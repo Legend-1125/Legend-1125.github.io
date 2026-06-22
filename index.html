@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AniZone - Premium Anime Streaming</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+    <!-- ELEGANT LOADING SCREEN -->
+    <div id="loading" class="hidden">
+        <div class="loader-backdrop"></div>
+        <div class="loader-content">
+            <div class="loader-logo">Ani<span>Zone</span></div>
+            <div class="loader-ring">
+                <svg viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="30" cy="30" r="26" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="3"/>
+                    <circle cx="30" cy="30" r="26" fill="none" stroke="var(--accent-red)" stroke-width="3"
+                        stroke-dasharray="40 124" stroke-linecap="round" class="loader-arc"/>
+                </svg>
+            </div>
+            <div class="loader-label">Loading...</div>
+        </div>
+    </div>
+
+    <!-- NAVBAR -->
+    <nav class="navbar" id="main-nav">
+        <div class="nav-left">
+            <button id="hamburger-btn" class="hamburger" aria-label="Menu" aria-expanded="false">
+                <span></span><span></span><span></span>
+            </button>
+            <div class="brand-logo" id="logo-btn">
+                <span class="logo-text">Ani<span class="logo-highlight">Zone</span></span>
+                <span class="logo-tagline">by Kito</span>
+            </div>
+            <div class="nav-links" id="nav-menu-panel">
+                <button class="nav-btn active" data-tab="view-home">Home</button>
+                <button class="nav-btn" data-tab="view-history">My List</button>
+                <button class="nav-btn" id="shuffle-btn">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
+                    Surprise Me
+                </button>
+            </div>
+        </div>
+        
+        <div class="nav-right">
+            <div class="search-wrapper">
+                <button id="search-icon-trigger" class="search-icon-btn" title="Search">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                </button>
+                <div class="search-input-container">
+                    <input type="text" id="search-input" placeholder="Titles, studios..." autocomplete="off">
+                    <button id="clear-search-btn" class="hidden">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
+                <div id="search-suggestions" class="dropdown-panel hidden"></div>
+            </div>
+            <div class="profile-avatar">
+                <img src="https://upload.wikimedia.org/wikipedia/commons/0/0b/Netflix-avatar.png" alt="Profile">
+            </div>
+        </div>
+    </nav>
+
+    <main class="app-container">
+
+        <!-- VIEW: HOME -->
+        <section id="view-home" class="tab-view">
+            <!-- Hero Billboard -->
+            <div class="hero-billboard" id="home-hero">
+                <div class="hero-vignette"></div>
+                <button class="hero-nav-arrow hero-prev-btn" id="hero-prev-btn" aria-label="Previous trending title">‹</button>
+                <button class="hero-nav-arrow hero-next-btn" id="hero-next-btn" aria-label="Next trending title">›</button>
+                <div class="hero-content">
+                    <div class="hero-badges">
+                        <span class="hero-badge top-10">#1 Trending</span>
+                        <span class="hero-badge new-season">Summer 2026</span>
+                    </div>
+                    <h1 class="hero-title" id="hero-title">Loading...</h1>
+                    <p class="hero-synopsis" id="hero-synopsis">Fetching the latest trending anime...</p>
+                    <div class="hero-actions">
+                        <button class="btn-primary hero-play-btn" id="hero-watch-btn">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                            Watch Now
+                        </button>
+                        <button class="btn-secondary hero-info-btn" id="hero-info-btn">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                            More Info
+                        </button>
+                    </div>
+                    <div class="hero-indicators" id="hero-indicators"></div>
+                </div>
+            </div>
+
+            <!-- Row 1: Trending Now -->
+            <div class="content-row">
+                <div class="row-header">
+                    <h2>Trending Now</h2>
+                    <button class="see-more-btn" data-target="trending">See All <span>›</span></button>
+                </div>
+                <div class="slider-container">
+                    <button class="slider-arrow left-arrow">‹</button>
+                    <div class="slider-track" id="row-trending"></div>
+                    <button class="slider-arrow right-arrow">›</button>
+                </div>
+            </div>
+
+            <!-- Row 2: Top Rated -->
+            <div class="content-row">
+                <div class="row-header">
+                    <h2>Top Rated Masterpieces</h2>
+                    <button class="see-more-btn" data-target="top">See All <span>›</span></button>
+                </div>
+                <div class="slider-container">
+                    <button class="slider-arrow left-arrow">‹</button>
+                    <div class="slider-track" id="row-top"></div>
+                    <button class="slider-arrow right-arrow">›</button>
+                </div>
+            </div>
+
+            <!-- Row 3: Discover -->
+            <div class="content-row discover-row">
+                <div class="row-header">
+                    <h2>Discover</h2>
+                    <button class="see-more-btn" data-target="discover">Explore Grid <span>›</span></button>
+                </div>
+                
+                <!-- Clean pill-style filter bar -->
+                <div class="filter-bar inline-filters">
+                    <div class="filter-pill-group">
+                        <select id="home-filter-genre" class="filter-pill">
+                            <option value="">All Genres</option>
+                            <option value="1">Action</option>
+                            <option value="2">Adventure</option>
+                            <option value="5">Avant Garde</option>
+                            <option value="4">Sci-Fi</option>
+                            <option value="8">Drama</option>
+                            <option value="10">Fantasy</option>
+                            <option value="14">Horror</option>
+                            <option value="7">Mystery</option>
+                            <option value="22">Romance</option>
+                            <option value="36">Slice of Life</option>
+                            <option value="30">Sports</option>
+                            <option value="37">Supernatural</option>
+                            <option value="41">Suspense</option>
+                            <option value="9">Comedy</option>
+                            <option value="26">Girls Love</option>
+                            <option value="28">Boys Love</option>
+                            <option value="46">Award Winning</option>
+                            <option value="47">Gourmet</option>
+                            <option value="62">Isekai</option>
+                            <option value="27">Shounen</option>
+                            <option value="25">Shoujo</option>
+                            <option value="42">Seinen</option>
+                            <option value="43">Josei</option>
+                            <option value="15">Kids</option>
+                            <option value="50">Adult Cast</option>
+                            <option value="51">Anthropomorphic</option>
+                            <option value="52">CGDCT</option>
+                            <option value="53">Childcare</option>
+                            <option value="54">Combat Sports</option>
+                            <option value="39">Detective</option>
+                            <option value="55">Cyberpunk</option>
+                            <option value="56">Educational</option>
+                            <option value="57">High Stakes Game</option>
+                            <option value="58">Historical</option>
+                            <option value="35">Harem</option>
+                            <option value="59">Idols (Female)</option>
+                            <option value="60">Idols (Male)</option>
+                            <option value="63">Love Polygon</option>
+                            <option value="64">Magical Sex Shift</option>
+                            <option value="65">Mahou Shoujo</option>
+                            <option value="66">Martial Arts</option>
+                            <option value="18">Mecha</option>
+                            <option value="67">Medical</option>
+                            <option value="38">Military</option>
+                            <option value="19">Music</option>
+                            <option value="20">Parody</option>
+                            <option value="68">Mythology</option>
+                            <option value="69">Organized Crime</option>
+                            <option value="70">Otaku Culture</option>
+                            <option value="71">Performing Arts</option>
+                            <option value="40">Psychological</option>
+                            <option value="72">Racing</option>
+                            <option value="73">Reincarnation</option>
+                            <option value="74">Reverse Harem</option>
+                            <option value="75">Romantic Subtext</option>
+                            <option value="21">Samurai</option>
+                            <option value="23">School</option>
+                            <option value="76">Showbiz</option>
+                            <option value="11">Strategy Game</option>
+                            <option value="77">Space</option>
+                            <option value="78">Survival</option>
+                            <option value="79">Team Sports</option>
+                            <option value="80">Time Travel</option>
+                            <option value="24">Vampire</option>
+                            <option value="81">Video Game</option>
+                            <option value="82">Visual Arts</option>
+                            <option value="83">Workplace</option>
+                        </select>
+                        <select id="filter-year" class="filter-pill"></select>
+                        <select id="filter-season" class="filter-pill">
+                            <option value="summer">Summer</option>
+                            <option value="spring">Spring</option>
+                            <option value="fall">Fall</option>
+                            <option value="winter">Winter</option>
+                        </select>
+                        <select id="discover-type" class="filter-pill">
+                            <option value="">All Types</option>
+                            <option value="tv">TV</option>
+                            <option value="movie">Movie</option>
+                            <option value="ova">OVA</option>
+                        </select>
+                        <select id="discover-status" class="filter-pill">
+                            <option value="">Any Status</option>
+                            <option value="airing">Airing</option>
+                            <option value="complete">Completed</option>
+                        </select>
+                        <select id="discover-rating" class="filter-pill">
+                            <option value="">Any Rating</option>
+                            <option value="g">G</option>
+                            <option value="pg13">PG-13</option>
+                            <option value="r17">R17+</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="slider-container">
+                    <button class="slider-arrow left-arrow">‹</button>
+                    <div class="slider-track" id="row-discover"></div>
+                    <button class="slider-arrow right-arrow">›</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- VIEW: EXPANDED GRID / SEARCH RESULTS -->
+        <section id="view-results" class="tab-view hidden">
+            <div class="grid-view-header">
+                <button class="btn-back" id="grid-back-btn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+                    Back
+                </button>
+                <h2 id="grid-title">Results</h2>
+            </div>
+
+            <div id="autocorrect-banner" class="alert-banner hidden"></div>
+
+            <!-- Global Filters for search/expanded grids -->
+            <div class="filter-bar global-filters" id="global-filters-container">
+                <div class="filter-pill-group">
+                    <select id="filter-type" class="filter-pill">
+                        <option value="">All Types</option>
+                        <option value="tv">TV Show</option>
+                        <option value="movie">Movie</option>
+                        <option value="ova">OVA</option>
+                    </select>
+                    <select id="filter-status" class="filter-pill">
+                        <option value="">Any Status</option>
+                        <option value="airing">Currently Airing</option>
+                        <option value="complete">Completed</option>
+                    </select>
+                    <select id="filter-rating" class="filter-pill">
+                        <option value="">Any Rating</option>
+                        <option value="g">G - All Ages</option>
+                        <option value="pg13">PG-13</option>
+                        <option value="r17">R17+</option>
+                    </select>
+                    <select id="filter-order" class="filter-pill">
+                        <option value="default">Best Match</option>
+                        <option value="popularity">Popularity</option>
+                        <option value="score">Score</option>
+                        <option value="start_date">Release Date</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="results-meta">
+                <span id="results-count" class="meta-tag">0 Matches</span>
+            </div>
+
+            <div class="card-grid" id="search-results-grid"></div>
+
+            <div class="pagination-controls">
+                <button id="prev-page-btn" class="btn-nav" disabled>‹ Prev</button>
+                <span id="page-indicator" class="page-num">Page 1</span>
+                <button id="next-page-btn" class="btn-nav" disabled>Next ›</button>
+            </div>
+        </section>
+
+        <!-- VIEW: DETAILS -->
+        <section id="view-details" class="tab-view hidden">
+            <button class="btn-circular floating-back" id="back-btn" title="Go Back">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+
+            <div class="details-hero">
+                <div class="details-hero-backdrop" id="detail-backdrop"></div>
+                <div class="details-hero-vignette"></div>
+                
+                <div class="details-hero-content">
+                    <div class="poster-container">
+                        <img id="detail-poster" src="" alt="Anime Poster">
+                    </div>
+                    
+                    <div class="info-container">
+                        <h1 id="detail-title">Loading Title...</h1>
+                        
+                        <div class="meta-badges">
+                            <span class="badge match-score" id="badge-score">98% Match</span>
+                            <span class="badge" id="badge-year">2026</span>
+                            <span class="badge age-rating" id="badge-rating">TV-MA</span>
+                            <span class="badge" id="badge-episodes">24 Episodes</span>
+                            <span class="badge border-badge" id="badge-type">TV</span>
+                        </div>
+
+                        <p class="synopsis" id="detail-synopsis">Loading synopsis...</p>
+                        
+                        <div class="cast-crew-inline">
+                            <span class="label">Studios:</span> <span id="detail-studio" class="value">Loading...</span><br>
+                            <span class="label">Status:</span> <span id="badge-status" class="value">Loading...</span>
+                        </div>
+
+                        <div class="streaming-actions" id="streaming-links-container"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bottom: Cast & Franchise -->
+            <div class="details-bottom-content">
+                <div class="content-section">
+                    <h3>Cast &amp; Characters</h3>
+                    <div class="cast-grid" id="characters-list"></div>
+                </div>
+                
+                <div class="content-section">
+                    <h3>Franchise Timeline</h3>
+                    <div class="timeline-container" id="chrono-timeline"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- VIEW: MY LIST -->
+        <section id="view-history" class="tab-view hidden">
+            <div class="page-header">
+                <h2>My List &amp; History</h2>
+                <button id="clear-click-history" class="btn-danger">Clear History</button>
+            </div>
+            <div class="card-grid" id="click-history-grid"></div>
+        </section>
+
+    </main>
+
+    <!-- VOICE ACTOR MODAL -->
+    <div id="va-modal" class="modal-overlay hidden">
+        <div class="modal-content netflix-style-modal">
+            <button id="close-va-modal" class="btn-circular close-modal">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+            <div class="modal-header">
+                <h2 id="va-modal-name">Voice Actor</h2>
+                <p class="modal-subtitle">Known Roles &amp; Portfolio</p>
+            </div>
+            <div class="modal-body" id="va-roles-container"></div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
