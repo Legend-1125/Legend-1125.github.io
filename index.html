@@ -40,6 +40,7 @@
             <div class="nav-links" id="nav-menu-panel">
                 <button class="nav-btn active" data-tab="view-home">Home</button>
                 <button class="nav-btn" data-tab="view-history">My List</button>
+                <button class="nav-btn" data-tab="view-schedule">Schedule</button>
                 <button class="nav-btn" id="shuffle-btn">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
                     Surprise Me
@@ -342,6 +343,17 @@
                 </div>
             </div>
         </section>
+
+        <!-- VIEW: SCHEDULE -->
+        <section id="view-schedule" class="tab-view hidden">
+            <div class="schedule-header">
+                <h2 class="schedule-title">Airing Schedule</h2>
+                <p class="schedule-subtitle">New episodes releasing this week</p>
+            </div>
+            <div class="schedule-day-nav" id="schedule-day-nav"></div>
+            <div class="schedule-list-container" id="schedule-list"></div>
+        </section>
+
 
         <!-- VIEW: MY LIST -->
         <section id="view-history" class="tab-view hidden">

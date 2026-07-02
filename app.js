@@ -71,10 +71,15 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('popstate', handleBrowserBackNavigation);
 
     if (history.state && history.state.view) {
-        if (history.state.view === 'view-details' && history.state.animeId) {
+        const v = history.state.view;
+        if (v === 'view-details' && history.state.animeId) {
             viewSingleAnime(history.state.animeId, false);
+        } else if (v === 'view-results' && history.state.target) {
+            restoreResultsGridState(history.state);
         } else {
-            syncViewRoute(history.state.view, false);
+            syncViewRoute(v, false);
+            if (v === 'view-schedule') initScheduleView();
+            if (v === 'view-history') renderHistoryLogGrid();
         }
     } else {
         history.replaceState({ view: 'view-home' }, "", "");
@@ -205,6 +210,7 @@ function initNavigation() {
             if (tab) {
                 syncViewRoute(tab, true);
                 if (tab === 'view-history') renderHistoryLogGrid();
+                if (tab === 'view-schedule') initScheduleView();
             }
         });
     });
@@ -1337,3 +1343,149 @@ document.getElementById('clear-click-history').addEventListener('click', () => {
 });
 
 renderHistoryLogGrid();
+
+/* ==========================================
+   SCHEDULE VIEW
+   ========================================== */
+
+let scheduleInitialized = false;
+
+function initScheduleView() {
+    if (scheduleInitialized) return;
+    scheduleInitialized = true;
+    buildDayNav();
+}
+
+function buildDayNav() {
+    const nav = document.getElementById('schedule-day-nav');
+    if (!nav) return;
+    nav.innerHTML = '';
+
+    const today = new Date();
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    for (let i = 0; i < 7; i++) {
+        const d = new Date(today);
+        d.setDate(today.getDate() + i);
+
+        const btn = document.createElement('button');
+        btn.className = 'sched-day-btn' + (i === 0 ? ' active' : '');
+        btn.innerHTML = `
+            <span class="sched-day-month">${months[d.getMonth()]} ${d.getDate()}</span>
+            <span class="sched-day-name">${i === 0 ? 'Today' : days[d.getDay()]}</span>
+        `;
+        btn.addEventListener('click', () => {
+            nav.querySelectorAll('.sched-day-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            fetchScheduleForDay(d.getDay());
+        });
+        nav.appendChild(btn);
+    }
+
+    fetchScheduleForDay(today.getDay());
+}
+
+async function fetchScheduleForDay(dayOfWeek) {
+    const list = document.getElementById('schedule-list');
+    if (!list) return;
+
+    list.innerHTML = `<div class="schedule-loading"><div class="sched-spinner"></div><span>Fetching schedule...</span></div>`;
+
+    const dayNames = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+    const dayParam = dayNames[dayOfWeek];
+
+    try {
+        // Fetch up to 3 pages to get a full day's schedule
+        let allItems = [];
+        for (let page = 1; page <= 3; page++) {
+            const res = await fetch(`https://api.jikan.moe/v4/schedules?filter=${dayParam}&limit=25&page=${page}`);
+            const json = await res.json();
+            const items = json.data || [];
+            allItems = allItems.concat(items);
+            if (!json.pagination?.has_next_page) break;
+        }
+
+        // Filter TV only and deduplicate by mal_id
+        const seen = new Set();
+        const unique = allItems.filter(a => {
+            if (seen.has(a.mal_id)) return false;
+            seen.add(a.mal_id);
+            return true;
+        });
+
+        renderScheduleList(unique, dayOfWeek);
+    } catch(e) {
+        list.innerHTML = `<div class="schedule-empty"><span>Could not load schedule. Please try again.</span></div>`;
+    }
+}
+
+// Convert JST "HH:MM" to user's local time string
+function jstToLocal(jstTime) {
+    if (!jstTime) return null;
+    const [h, m] = jstTime.split(':').map(Number);
+    // JST = UTC+9
+    const utcMs = Date.UTC(2000, 0, 1, h - 9, m);
+    const local = new Date(utcMs);
+    return local.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+}
+
+function renderScheduleList(items, dayOfWeek) {
+    const list = document.getElementById('schedule-list');
+    if (!list) return;
+
+    if (!items || items.length === 0) {
+        list.innerHTML = `<div class="schedule-empty"><span>No episodes scheduled for this day.</span></div>`;
+        return;
+    }
+
+    // Sort by broadcast JST time
+    items.sort((a, b) => {
+        const ta = a.broadcast?.time || '99:99';
+        const tb = b.broadcast?.time || '99:99';
+        return ta.localeCompare(tb);
+    });
+
+    // Get user's timezone abbreviation
+    const tzAbbr = new Intl.DateTimeFormat('en', { timeZoneName: 'short' })
+        .formatToParts(new Date())
+        .find(p => p.type === 'timeZoneName')?.value || 'Local';
+
+    list.innerHTML = '';
+    items.forEach(anime => {
+        const item = document.createElement('div');
+        item.className = 'schedule-item';
+
+        const rawTime = anime.broadcast?.time;
+        const localTime = jstToLocal(rawTime);
+        let timeHTML = '';
+        if (localTime) {
+            timeHTML = `<div class="sched-time"><span class="sched-time-val">${localTime}</span><span class="sched-time-tz">${tzAbbr}</span></div>`;
+        } else {
+            timeHTML = `<div class="sched-time sched-time--tba"><span class="sched-time-val">TBA</span></div>`;
+        }
+
+        const ep = anime.episodes ? `${anime.episodes} eps` : 'Ongoing';
+        const score = anime.score ? anime.score.toFixed(1) : null;
+        const genres = (anime.genres || []).slice(0, 2).map(g => g.name).join(' · ');
+
+        item.innerHTML = `
+            ${timeHTML}
+            <img class="sched-poster" src="${anime.images?.jpg?.image_url || ''}" alt="${anime.title}" loading="lazy">
+            <div class="sched-info">
+                <div class="sched-anime-title">${anime.title}</div>
+                <div class="sched-meta">
+                    <span class="sched-ep">${ep}</span>
+                    ${genres ? `<span class="sched-genres">${genres}</span>` : ''}
+                    <span class="sched-badge airing">Airing</span>
+                </div>
+            </div>
+            ${score ? `<div class="sched-score"><svg width="11" height="11" viewBox="0 0 24 24" fill="#f5c518"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>${score}</div>` : ''}
+        `;
+
+        item.style.cursor = 'pointer';
+        item.addEventListener('click', () => viewSingleAnime(anime.mal_id));
+
+        list.appendChild(item);
+    });
+}
