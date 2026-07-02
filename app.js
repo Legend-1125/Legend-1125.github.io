@@ -405,9 +405,10 @@ function renderHeroSlide(index) {
     const rankBadge = document.querySelector('.hero-badge.top-10');
     if (rankBadge) rankBadge.textContent = `#${index + 1} Trending`;
 
-    const go = () => viewSingleAnime(anime.mal_id);
-    document.getElementById('hero-watch-btn').onclick = go;
-    document.getElementById('hero-info-btn').onclick = go;
+    const anikotoTitle = anime.title_english || anime.title || '';
+    const anikotoUrl = `https://anikototv.to/filter?keyword=${encodeURIComponent(anikotoTitle)}`;
+    document.getElementById('hero-watch-btn').onclick = () => window.open(anikotoUrl, '_blank', 'noopener,noreferrer');
+    document.getElementById('hero-info-btn').onclick = () => viewSingleAnime(anime.mal_id);
 
     document.querySelectorAll('#hero-indicators .hero-dot').forEach((dot, i) => {
         dot.classList.toggle('active', i === index);
