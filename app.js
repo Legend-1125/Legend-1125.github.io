@@ -1,51 +1,99 @@
-// ==========================================
-// 1. GLOBAL STATE & CACHE
-// ==========================================
-let clickHistory = JSON.parse(localStorage.getItem('chronoClickHistory')) || [];
-const franchiseCache = {};
+// AniZone — AniList GraphQL edition
+// Single-file application data layer, routing, rendering and local cache.
 
-let currentSearchQuery = "";
+const ANILIST_API = 'https://graphql.anilist.co';
+const JIKAN_API = 'https://api.jikan.moe/v4';
+const MAL_SCORE_PREFIX = 'anizone:mal-score:v1:';
+const MAL_SCORE_TTL = 7 * 24 * 60 * 60 * 1000;
+const PAGE_SIZE = 24;
+const CACHE_PREFIX = 'anizone:anilist:v2:';
+const CACHE_TTL = {
+    trending: 30 * 60 * 1000,
+    top: 24 * 60 * 60 * 1000,
+    discover: 6 * 60 * 60 * 1000,
+    search: 15 * 60 * 1000,
+    details: 7 * 24 * 60 * 60 * 1000,
+    studio: 6 * 60 * 60 * 1000,
+    schedule: 10 * 60 * 1000,
+};
+
+const HISTORY_KEY = 'anizoneAniListHistory';
+const HISTORY_LIMIT = 100;
+
+function compactHistoryItem(anime) {
+    return {
+        id: Number(anime?.id),
+        isAdult: Boolean(anime?.isAdult),
+        title: {
+            english: anime?.title?.english || null,
+            romaji: anime?.title?.romaji || null,
+            native: anime?.title?.native || null,
+        },
+        coverImage: { large: anime?.coverImage?.large || anime?.coverImage?.extraLarge || anime?.coverImage?.medium || '' },
+        averageScore: anime?.averageScore || null,
+        format: anime?.format || null,
+        viewedAt: anime?.viewedAt || Date.now(),
+    };
+}
+function clearAniListCaches() {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key?.startsWith(CACHE_PREFIX)) localStorage.removeItem(key);
+    }
+}
+function persistHistory() {
+    const payload = JSON.stringify(clickHistory.slice(0, HISTORY_LIMIT));
+    try {
+        localStorage.setItem(HISTORY_KEY, payload);
+    } catch (error) {
+        // Old API caches can consume the storage quota. They are disposable;
+        // history and preferences are not.
+        clearAniListCaches();
+        try { localStorage.setItem(HISTORY_KEY, payload); }
+        catch (retryError) { console.warn('Unable to persist history:', retryError); }
+    }
+}
+function loadCompactHistory() {
+    try {
+        const raw = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+        if (!Array.isArray(raw)) return [];
+        const seen = new Set();
+        return raw.map(compactHistoryItem).filter(item => {
+            if (!item.id || seen.has(item.id)) return false;
+            seen.add(item.id);
+            return true;
+        }).slice(0, HISTORY_LIMIT);
+    } catch { return []; }
+}
+
+let clickHistory = loadCompactHistory();
+let titleLanguage = localStorage.getItem('anizoneTitleLanguage') || 'english';
+let adultContentEnabled = localStorage.getItem('anizoneAdultEnabled') === 'true';
+let castLanguage = localStorage.getItem('anizoneCastLanguage') || 'JAPANESE';
+let currentCastEdges = [];
+let currentDetailAnime = null;
+let heroBackgroundLayer = 0;
+let selectedDiscoverAdult = localStorage.getItem('anizoneDiscoverAdultMode') || (adultContentEnabled ? 'both' : 'regular');
+
+let currentSearchQuery = '';
 let currentPage = 1;
-let hasNextPage = false;
-const searchPageSize = 24;
-let currentActiveRowTarget = "";
-
-// Virtual pagination over the raw Jikan API: Jikan occasionally repeats
-// entries across pages of the same listing (seasons/now especially — the
-// duplicate count compounds the further you page), which would otherwise
-// shrink a "24 per page" grid down to as few as ~19 visible cards. These
-// dedupe across raw API pages within a session and only hand out a display
-// page once it actually has 24 unique items (or the API is truly out of
-// data), then cache it so Prev/Next never re-fetch or change content for a
-// page already seen.
-let resultsSessionKey = "";
-let resultsPageCache = new Map();
-let resultsBuffer = [];
-let resultsSeenIds = new Set();
-let resultsNextRawPage = 1;
-let resultsApiExhausted = false;
-let resultsMaxBuiltPage = 0;
-let resultsMeta = { total: 0, lastVisiblePage: null };
-
-let selectedDiscoverGenre = "";
-let selectedDiscoverYear = String(new Date().getFullYear());
-let selectedDiscoverSeason = "summer";
-let selectedDiscoverType = "";
-let selectedDiscoverStatus = "";
-let selectedDiscoverRating = "";
-
+let currentActiveRowTarget = '';
 let selectedStudioId = null;
-let selectedStudioName = "";
-
-let isRoutingStateUpdating = false;
-
+let selectedStudioName = '';
+let selectedDiscoverGenre = '';
+let selectedDiscoverYear = String(new Date().getFullYear());
+let selectedDiscoverSeason = getCurrentSeason();
+let selectedDiscoverType = '';
+let selectedDiscoverStatus = '';
+let selectedDiscoverRating = '';
+let resultsPageInfo = null;
+let resultsRequestToken = 0;
+let suggestionController = null;
 let heroSlides = [];
 let heroSlideIndex = 0;
 let heroInterval = null;
+let scheduleInitialized = false;
 
-// ==========================================
-// 2. DOM BINDINGS
-// ==========================================
 const views = document.querySelectorAll('.tab-view');
 const navButtons = document.querySelectorAll('.nav-btn');
 const searchInput = document.getElementById('search-input');
@@ -54,1439 +102,1274 @@ const suggestionsDropdown = document.getElementById('search-suggestions');
 const loading = document.getElementById('loading');
 const mainNav = document.getElementById('main-nav');
 
-// ==========================================
-// 3. INIT
-// ==========================================
-document.addEventListener('DOMContentLoaded', () => {
-    initNavigation();
-    initSearchEngine();
-    initSliders();
-    initDiscoverFilters();
-    initGlobalFilterListeners(); // <-- separate, no DOMContentLoaded nesting
-    initImageLazyLoad();
-    initHeroControls();
+function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+function getCurrentSeason() {
+    const month = new Date().getMonth();
+    if (month < 3) return 'WINTER';
+    if (month < 6) return 'SPRING';
+    if (month < 9) return 'SUMMER';
+    return 'FALL';
+}
+function escapeHtml(value) {
+    return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+function stripHtml(value) {
+    const element = document.createElement('div');
+    element.innerHTML = value || '';
+    return element.textContent || element.innerText || '';
+}
+function showLoading(show) { loading?.classList.toggle('hidden', !show); }
+function displayTitle(anime, forceEnglish = false) {
+    const titles = anime?.title || {};
+    if (forceEnglish || titleLanguage === 'english') return titles.english || titles.romaji || titles.native || 'Untitled';
+    return titles.romaji || titles.english || titles.native || 'Untitled';
+}
+function secondaryTitle(anime) {
+    const primary = displayTitle(anime);
+    const other = titleLanguage === 'english' ? anime?.title?.romaji : anime?.title?.english;
+    return other && other !== primary ? other : '';
+}
+function imageUrl(anime) { return anime?.coverImage?.extraLarge || anime?.coverImage?.large || anime?.coverImage?.medium || ''; }
+function dateNumber(date) {
+    if (!date?.year) return Number.MAX_SAFE_INTEGER;
+    return date.year * 10000 + (date.month || 1) * 100 + (date.day || 1);
+}
+function formatDate(date) {
+    if (!date?.year) return 'TBA';
+    return new Date(date.year, (date.month || 1) - 1, date.day || 1).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+}
+function formatStatus(status) {
+    return ({ RELEASING: 'Airing', FINISHED: 'Completed', NOT_YET_RELEASED: 'Upcoming', CANCELLED: 'Cancelled', HIATUS: 'Hiatus' })[status] || status || 'Unknown';
+}
+function formatFormat(format) {
+    return ({ TV: 'TV', TV_SHORT: 'TV Short', MOVIE: 'Movie', SPECIAL: 'Special', OVA: 'OVA', ONA: 'ONA', MUSIC: 'Music' })[format] || format || 'Anime';
+}
+function seasonLabel() {
+    return `${selectedDiscoverSeason.charAt(0)}${selectedDiscoverSeason.slice(1).toLowerCase()} ${selectedDiscoverYear}`;
+}
 
-    loadDashboardRows();
+function cacheGet(key) {
+    try {
+        const record = JSON.parse(localStorage.getItem(CACHE_PREFIX + key) || 'null');
+        if (!record || Date.now() > record.expiresAt) return null;
+        return record.value;
+    } catch { return null; }
+}
+function pruneAniListCaches(maxEntries = 28) {
+    const entries = [];
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (!key?.startsWith(CACHE_PREFIX)) continue;
+        try {
+            const record = JSON.parse(localStorage.getItem(key) || 'null');
+            if (!record || Date.now() > record.expiresAt) localStorage.removeItem(key);
+            else entries.push({ key, storedAt: record.storedAt || 0 });
+        } catch { localStorage.removeItem(key); }
+    }
+    entries.sort((a, b) => b.storedAt - a.storedAt).slice(maxEntries).forEach(entry => localStorage.removeItem(entry.key));
+}
+function cacheSet(key, value, ttl) {
+    const payload = JSON.stringify({ value, expiresAt: Date.now() + ttl, storedAt: Date.now() });
+    try {
+        pruneAniListCaches();
+        localStorage.setItem(CACHE_PREFIX + key, payload);
+    } catch {
+        clearAniListCaches();
+        try { localStorage.setItem(CACHE_PREFIX + key, payload); } catch { /* live data is still usable */ }
+    }
+}
 
-    window.addEventListener('popstate', handleBrowserBackNavigation);
 
-    if (history.state && history.state.view) {
-        const v = history.state.view;
-        if (v === 'view-details' && history.state.animeId) {
-            viewSingleAnime(history.state.animeId, false);
-        } else if (v === 'view-results' && history.state.target) {
-            restoreResultsGridState(history.state);
-        } else {
-            syncViewRoute(v, false);
-            if (v === 'view-schedule') initScheduleView();
-            if (v === 'view-history') renderHistoryLogGrid();
+function getCachedMalScore(malId) {
+    if (!malId) return null;
+    try {
+        const record = JSON.parse(localStorage.getItem(MAL_SCORE_PREFIX + malId) || 'null');
+        if (!record || Date.now() > record.expiresAt) {
+            localStorage.removeItem(MAL_SCORE_PREFIX + malId);
+            return null;
         }
-    } else {
-        history.replaceState({ view: 'view-home' }, "", "");
+        return record.score ?? null;
+    } catch { return null; }
+}
+function setCachedMalScore(malId, score) {
+    if (!malId || score == null) return;
+    try {
+        localStorage.setItem(MAL_SCORE_PREFIX + malId, JSON.stringify({ score, expiresAt: Date.now() + MAL_SCORE_TTL }));
+    } catch {
+        // MAL scores are optional; never let storage issues break the detail page.
     }
-
-    window.addEventListener('scroll', () => {
-        mainNav.classList.toggle('scrolled', window.scrollY > 20);
-    });
-});
-
-// ==========================================
-// UTILITIES
-// ==========================================
-function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function escapeHtml(str) {
-    return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
-
-function showLoading(show) {
-    loading.classList.toggle('hidden', !show);
-}
-
-// Removes entries with duplicate mal_id (Jikan occasionally repeats an entry
-// within a single page, e.g. seasons/now). Title-based dedup was tried but
-// drops pages below the fixed 24-per-page count, so id-only is intentional.
-function dedupeAnimeList(list) {
-    const seenIds = new Set();
-    const result = [];
-    (list || []).forEach(anime => {
-        const id = anime.mal_id;
-        if (seenIds.has(id)) return;
-        seenIds.add(id);
-        result.push(anime);
-    });
-    return result;
-}
-
-// Lazy load image fade-in
-function initImageLazyLoad() {
-    const observer = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            if (entry.isIntersecting) {
-                const img = entry.target;
-                img.addEventListener('load', () => img.classList.add('loaded'));
-                if (img.complete) img.classList.add('loaded');
-                observer.unobserve(img);
+async function jikanRequest(path, { retries = 1 } = {}) {
+    let lastError = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            const response = await fetch(`${JIKAN_API}${path}`, { headers: { Accept: 'application/json' } });
+            let payload = null;
+            try { payload = await response.json(); } catch { /* handled below */ }
+            if (response.ok) return payload;
+            const message = payload?.message || `Jikan request failed (${response.status}).`;
+            lastError = new Error(message);
+            if ((response.status === 429 || response.status >= 500) && attempt < retries) {
+                const retryAfter = Number(response.headers.get('Retry-After')) || (attempt + 1) * 2;
+                await delay(retryAfter * 1000);
+                continue;
             }
-        });
-    });
-    const mutObs = new MutationObserver(mutations => {
-        mutations.forEach(m => {
-            m.addedNodes.forEach(node => {
-                if (node.tagName === 'IMG') observer.observe(node);
-                if (node.querySelectorAll) node.querySelectorAll('img').forEach(img => observer.observe(img));
-            });
-        });
-    });
-    mutObs.observe(document.body, { childList: true, subtree: true });
+            throw lastError;
+        } catch (error) {
+            lastError = error;
+            if (attempt < retries) {
+                await delay((attempt + 1) * 1000);
+                continue;
+            }
+        }
+    }
+    throw lastError || new Error('Unable to reach Jikan.');
+}
+async function fetchMalScore(malId) {
+    if (!malId) return null;
+    const cached = getCachedMalScore(malId);
+    if (cached != null) return cached;
+    const payload = await jikanRequest(`/anime/${Number(malId)}`, { retries: 0 });
+    const score = payload?.data?.score;
+    if (score != null) setCachedMalScore(malId, score);
+    return score ?? null;
+}
+async function getAnimeByMalId(malId) {
+    const query = `query ($idMal: Int!) {
+        Media(idMal: $idMal, type: ANIME) { id idMal isAdult title { romaji english native } }
+    }`;
+    return aniRequest(query, { idMal: Number(malId) });
 }
 
-// ==========================================
-// 4. ROUTING
-// ==========================================
-function syncViewRoute(targetViewId, pushState = true, extraState = {}) {
-    isRoutingStateUpdating = true;
-    views.forEach(v => v.classList.add('hidden'));
-    const targetView = document.getElementById(targetViewId);
-    if (targetView) targetView.classList.remove('hidden');
-
-    navButtons.forEach(btn => {
-        btn.classList.toggle('active', btn.getAttribute('data-tab') === targetViewId);
-    });
-
-    if (pushState) history.pushState({ view: targetViewId, ...extraState }, "", "");
-    window.scrollTo({ top: 0 });
-    isRoutingStateUpdating = false;
-}
-
-function handleBrowserBackNavigation(event) {
-    if (!event.state) return;
-    if (event.state.view === 'view-details' && event.state.animeId) {
-        viewSingleAnime(event.state.animeId, false);
-    } else if (event.state.view === 'view-results' && event.state.target) {
-        restoreResultsGridState(event.state);
-    } else {
-        syncViewRoute(event.state.view, false);
+class AniListError extends Error {
+    constructor(message, status = 0, details = null) {
+        super(message);
+        this.name = 'AniListError';
+        this.status = status;
+        this.details = details;
     }
 }
 
-// Browser back/forward into the results grid re-derives everything from the
-// pushed state instead of trusting leftover DOM — avoids stale or empty
-// grids when several searches/studio clicks happened in between.
+async function aniRequest(query, variables = {}, options = {}) {
+    const { cacheKey = '', ttl = 0, signal } = options;
+    if (cacheKey) {
+        const cached = cacheGet(cacheKey);
+        if (cached) return cached;
+    }
+
+    let response;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            response = await fetch(ANILIST_API, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                body: JSON.stringify({ query, variables }),
+                signal,
+            });
+        } catch (error) {
+            if (error.name === 'AbortError') throw error;
+            if (attempt < 2) { await delay(700 * (attempt + 1)); continue; }
+            throw new AniListError('Unable to reach AniList. Check your connection and try again.');
+        }
+
+        if ((response.status === 429 || response.status >= 500) && attempt < 2) {
+            const retryAfter = Number(response.headers.get('Retry-After')) || 1 + attempt;
+            await delay(retryAfter * 1000);
+            continue;
+        }
+        break;
+    }
+
+    let payload;
+    try { payload = await response.json(); }
+    catch { throw new AniListError(`AniList returned an unreadable response (${response.status}).`, response.status); }
+
+    if (!response.ok || payload.errors?.length) {
+        const message = payload.errors?.map(error => error.message).join('; ') || `AniList request failed (${response.status}).`;
+        throw new AniListError(message, response.status, payload.errors || null);
+    }
+
+    if (cacheKey && ttl) cacheSet(cacheKey, payload.data, ttl);
+    return payload.data;
+}
+
+const MEDIA_CARD_FIELDS = `
+    id idMal isAdult
+    title { romaji english native }
+    coverImage { medium large extraLarge color }
+    bannerImage description(asHtml: false)
+    averageScore meanScore popularity trending favourites
+    format status episodes duration season seasonYear
+    startDate { year month day }
+    endDate { year month day }
+    genres
+    studios(isMain: true) { nodes { id name isAnimationStudio } }
+`;
+
+const MEDIA_DETAIL_FIELDS = `
+    ${MEDIA_CARD_FIELDS}
+    siteUrl source countryOfOrigin hashtag
+    synonyms
+    nextAiringEpisode { airingAt episode timeUntilAiring }
+    characters(sort: [ROLE, RELEVANCE, ID], perPage: 18) {
+        edges {
+            role
+            node { id name { full native } image { large medium } }
+            voiceActors(sort: [RELEVANCE, ID]) {
+                id
+                languageV2
+                name { full native }
+                image { large medium }
+            }
+        }
+    }
+    relations {
+        edges {
+            relationType(version: 2)
+            node {
+                id isAdult type format status episodes
+                title { romaji english native }
+                synonyms
+                coverImage { medium large extraLarge }
+                startDate { year month day }
+            }
+        }
+    }
+`;
+
+function mediaPageQuery(extraVariables = '', extraArguments = '') {
+    return `query ($page: Int!, $perPage: Int!${extraVariables}) {
+        Page(page: $page, perPage: $perPage) {
+            pageInfo { total currentPage lastPage hasNextPage perPage }
+            media(type: ANIME${extraArguments}) { ${MEDIA_CARD_FIELDS} }
+        }
+    }`;
+}
+
+function adultArgument() { return adultContentEnabled ? '' : ', isAdult: false'; }
+function formatVariable(value) {
+    const map = { tv: 'TV', movie: 'MOVIE', ova: 'OVA', ona: 'ONA', special: 'SPECIAL' };
+    return map[value] || null;
+}
+function statusVariable(value) {
+    return ({ airing: 'RELEASING', complete: 'FINISHED', upcoming: 'NOT_YET_RELEASED' })[value] || null;
+}
+function minimumScore(value) { return value ? Number(value) : null; }
+
+async function getTrending(page = 1, perPage = PAGE_SIZE) {
+    const query = mediaPageQuery('', `, sort: TRENDING_DESC${adultArgument()}`);
+    return aniRequest(query, { page, perPage }, { cacheKey: `trending:${adultContentEnabled}:${page}:${perPage}`, ttl: CACHE_TTL.trending });
+}
+async function getTopRated(page = 1, perPage = PAGE_SIZE) {
+    const query = mediaPageQuery('', `, sort: SCORE_DESC${adultArgument()}`);
+    return aniRequest(query, { page, perPage }, { cacheKey: `top:${adultContentEnabled}:${page}:${perPage}`, ttl: CACHE_TTL.top });
+}
+function buildMediaPageRequest({ page = 1, perPage = PAGE_SIZE, filters = {}, sort = null, cachePrefix = 'media', ttl = CACHE_TTL.search, signal } = {}) {
+    const variableDefs = ['$page: Int!', '$perPage: Int!'];
+    const mediaArgs = ['type: ANIME'];
+    const variables = { page, perPage };
+
+    const addVariable = (name, graphType, value, argument = name) => {
+        if (value === null || value === undefined || value === '') return;
+        variableDefs.push(`$${name}: ${graphType}`);
+        mediaArgs.push(`${argument}: $${name}`);
+        variables[name] = value;
+    };
+
+    addVariable('search', 'String', filters.search);
+    addVariable('season', 'MediaSeason', filters.season ? String(filters.season).toUpperCase() : null);
+    addVariable('seasonYear', 'Int', filters.year ? Number(filters.year) : null);
+    addVariable('genre', 'String', filters.genre);
+    addVariable('format', 'MediaFormat', formatVariable(filters.type));
+    addVariable('status', 'MediaStatus', statusVariable(filters.status));
+    addVariable('minimumScore', 'Int', minimumScore(filters.rating), 'averageScore_greater');
+
+    let adultValue = null;
+    if (!adultContentEnabled) adultValue = false;
+    else if (filters.adultMode === 'regular') adultValue = false;
+    else if (filters.adultMode === 'adult') adultValue = true;
+    addVariable('isAdult', 'Boolean', adultValue);
+
+    if (sort) {
+        variableDefs.push('$sort: [MediaSort]');
+        mediaArgs.push('sort: $sort');
+        variables.sort = Array.isArray(sort) ? sort : [sort];
+    }
+
+    const query = `query (${variableDefs.join(', ')}) {
+        Page(page: $page, perPage: $perPage) {
+            pageInfo { total currentPage lastPage hasNextPage perPage }
+            media(${mediaArgs.join(', ')}) { ${MEDIA_CARD_FIELDS} }
+        }
+    }`;
+    const cacheKey = `${cachePrefix}:${adultContentEnabled}:${JSON.stringify(variables)}`;
+    return aniRequest(query, variables, { cacheKey, ttl, signal });
+}
+
+async function getDiscover(page = 1, perPage = PAGE_SIZE) {
+    return buildMediaPageRequest({
+        page,
+        perPage,
+        filters: {
+            season: selectedDiscoverSeason,
+            year: selectedDiscoverYear,
+            genre: selectedDiscoverGenre,
+            type: selectedDiscoverType,
+            status: selectedDiscoverStatus,
+            rating: selectedDiscoverRating,
+            adultMode: selectedDiscoverAdult,
+        },
+        sort: 'POPULARITY_DESC',
+        cachePrefix: 'discover',
+        ttl: CACHE_TTL.discover,
+    });
+}
+
+async function searchAnime(queryText, page = 1, perPage = PAGE_SIZE, filters = {}, signal) {
+    const requestedSort = ({ popularity: 'POPULARITY_DESC', score: 'SCORE_DESC', start_date: 'START_DATE_DESC' })[filters.order];
+    // SEARCH_MATCH is only used for an unfiltered title search. Other filters use a
+    // normal media sort, avoiding AniList's illegal operator/value combinations.
+    const sort = requestedSort || ((filters.type || filters.status || filters.rating) ? 'POPULARITY_DESC' : 'SEARCH_MATCH');
+    return buildMediaPageRequest({
+        page,
+        perPage,
+        filters: { search: queryText, type: filters.type, status: filters.status, rating: filters.rating },
+        sort,
+        cachePrefix: 'search',
+        ttl: CACHE_TTL.search,
+        signal,
+    });
+}
+
+async function getStudioAnime(studioId, page = 1, perPage = PAGE_SIZE, filters = {}) {
+    const sort = ({ popularity: 'POPULARITY_DESC', score: 'SCORE_DESC', start_date: 'START_DATE_DESC' })[filters.order] || 'POPULARITY_DESC';
+    const query = `query ($id: Int!, $page: Int!, $perPage: Int!, $sort: [MediaSort]) {
+        Studio(id: $id) {
+            id name
+            media(page: $page, perPage: $perPage, sort: $sort, isMain: true) {
+                pageInfo { total currentPage lastPage hasNextPage perPage }
+                nodes { ${MEDIA_CARD_FIELDS} }
+            }
+        }
+    }`;
+    const data = await aniRequest(query, {
+        id: Number(studioId), page, perPage, sort: [sort],
+    }, {
+        cacheKey: `studio:${adultContentEnabled}:${studioId}:${page}:${perPage}:${sort}`,
+        ttl: CACHE_TTL.studio,
+    });
+
+    let items = data.Studio?.media?.nodes || [];
+    if (!adultContentEnabled) items = items.filter(item => !item.isAdult);
+    const wantedFormat = formatVariable(filters.type);
+    const wantedStatus = statusVariable(filters.status);
+    const scoreFloor = minimumScore(filters.rating);
+    if (wantedFormat) items = items.filter(item => item.format === wantedFormat);
+    if (wantedStatus) items = items.filter(item => item.status === wantedStatus);
+    if (scoreFloor) items = items.filter(item => Number(item.averageScore || 0) >= scoreFloor);
+
+    return {
+        Page: {
+            pageInfo: data.Studio?.media?.pageInfo || { total: items.length, currentPage: page, lastPage: page, hasNextPage: false, perPage },
+            media: items,
+        },
+    };
+}
+
+async function findStudios(search, perPage = 5, signal) {
+    // StudioSort does not support SEARCH_MATCH on all AniList deployments.
+    // The search argument already ranks relevant matches well enough.
+    const query = `query ($search: String!, $perPage: Int!) {
+        Page(page: 1, perPage: $perPage) {
+            studios(search: $search) { id name isAnimationStudio }
+        }
+    }`;
+    return aniRequest(query, { search, perPage }, { signal });
+}
+
+async function getAnimeDetails(id) {
+    const query = `query ($id: Int!) { Media(id: $id, type: ANIME) { ${MEDIA_DETAIL_FIELDS} } }`;
+    return aniRequest(query, { id: Number(id) }, { cacheKey: `detail:${id}`, ttl: CACHE_TTL.details });
+}
+
+function initImageLazyLoad() {
+    const observer = new IntersectionObserver(entries => {
+        entries.forEach(entry => {
+            if (!entry.isIntersecting) return;
+            const image = entry.target;
+            image.addEventListener('load', () => image.classList.add('loaded'), { once: true });
+            if (image.complete) image.classList.add('loaded');
+            observer.unobserve(image);
+        });
+    });
+    new MutationObserver(mutations => mutations.forEach(mutation => mutation.addedNodes.forEach(node => {
+        if (node.tagName === 'IMG') observer.observe(node);
+        node.querySelectorAll?.('img').forEach(image => observer.observe(image));
+    }))).observe(document.body, { childList: true, subtree: true });
+}
+
+function syncViewRoute(targetViewId, pushState = true, extraState = {}) {
+    views.forEach(view => view.classList.add('hidden'));
+    document.getElementById(targetViewId)?.classList.remove('hidden');
+    navButtons.forEach(button => button.classList.toggle('active', button.dataset.tab === targetViewId));
+    if (pushState) history.pushState({ view: targetViewId, ...extraState }, '', '');
+    window.scrollTo({ top: 0 });
+}
+function handleBrowserBackNavigation(event) {
+    const state = event.state;
+    if (!state) return;
+    if (state.view === 'view-details' && state.animeId) viewSingleAnime(state.animeId, false);
+    else if (state.view === 'view-results' && state.target) restoreResultsGridState(state);
+    else {
+        syncViewRoute(state.view, false);
+        if (state.view === 'view-history') renderHistoryLogGrid();
+        if (state.view === 'view-schedule') initScheduleView();
+    }
+}
 function restoreResultsGridState(state) {
     currentActiveRowTarget = state.target;
     currentPage = state.page || 1;
-    if (state.target === 'search') currentSearchQuery = state.query || '';
-    if (state.target === 'studio') {
-        selectedStudioId = state.studioId;
-        selectedStudioName = state.studioName || '';
-    }
-
-    const gridTitle = document.getElementById('grid-title');
-    const globalFilters = document.getElementById('global-filters-container');
-
-    if (state.target === 'trending' || state.target === 'top') {
-        globalFilters.classList.add('hidden');
-        gridTitle.textContent = state.target === 'trending' ? 'Trending Now — Full List' : 'Top Rated Masterpieces';
-    } else if (state.target === 'studio') {
-        globalFilters.classList.remove('hidden');
-        gridTitle.textContent = `Studio: ${selectedStudioName}`;
-    } else if (state.target === 'search') {
-        globalFilters.classList.remove('hidden');
-        gridTitle.textContent = `Search: "${currentSearchQuery}"`;
-    } else {
-        globalFilters.classList.remove('hidden');
-        gridTitle.textContent = 'Discover — Advanced Grid';
-    }
-
+    currentSearchQuery = state.query || currentSearchQuery;
+    selectedStudioId = state.studioId || selectedStudioId;
+    selectedStudioName = state.studioName || selectedStudioName;
+    configureResultsHeader(currentActiveRowTarget);
     syncViewRoute('view-results', false);
     fetchExpandedGridData();
 }
+function configureResultsHeader(target) {
+    const title = document.getElementById('grid-title');
+    const filters = document.getElementById('global-filters-container');
+    if (target === 'trending' || target === 'top') {
+        filters?.classList.add('hidden');
+        title.textContent = target === 'trending' ? 'Trending Now' : 'Top Rated';
+    } else {
+        filters?.classList.remove('hidden');
+        if (target === 'search') title.textContent = `Search: “${currentSearchQuery}”`;
+        else if (target === 'studio') title.textContent = `Studio: ${selectedStudioName}`;
+        else title.textContent = `Discover · ${seasonLabel()}`;
+    }
+}
 
 function initNavigation() {
-    navButtons.forEach(btn => {
-        btn.addEventListener('click', () => {
-            const tab = btn.getAttribute('data-tab');
-            if (tab) {
-                syncViewRoute(tab, true);
-                if (tab === 'view-history') renderHistoryLogGrid();
-                if (tab === 'view-schedule') initScheduleView();
-            }
-        });
-    });
-
-    document.getElementById('logo-btn').addEventListener('click', () => syncViewRoute('view-home', true));
-    document.getElementById('shuffle-btn').addEventListener('click', triggerRandomShuffle);
-    document.getElementById('grid-back-btn').addEventListener('click', () => syncViewRoute('view-home', false));
-    document.getElementById('back-btn').addEventListener('click', () => history.back());
-
-    const hamburgerBtn = document.getElementById('hamburger-btn');
-    const navMenuPanel = document.getElementById('nav-menu-panel');
-    hamburgerBtn.addEventListener('click', () => {
-        const opened = hamburgerBtn.getAttribute('aria-expanded') === 'true';
-        hamburgerBtn.setAttribute('aria-expanded', String(!opened));
-        hamburgerBtn.classList.toggle('open');
-        navMenuPanel.classList.toggle('open-panel');
-    });
-
-    const avatarImg = document.querySelector('.profile-avatar img');
-    avatarImg?.addEventListener('click', () => {
-        avatarImg.classList.remove('avatar-smiling');
-        void avatarImg.offsetWidth; // restart the animation on repeated clicks
-        avatarImg.classList.add('avatar-smiling');
+    navButtons.forEach(button => button.addEventListener('click', () => {
+        const tab = button.dataset.tab;
+        if (!tab) return;
+        syncViewRoute(tab, true);
+        if (tab === 'view-history') renderHistoryLogGrid();
+        if (tab === 'view-schedule') initScheduleView();
+    }));
+    document.getElementById('logo-btn')?.addEventListener('click', () => syncViewRoute('view-home', true));
+    document.getElementById('shuffle-btn')?.addEventListener('click', triggerRandomShuffle);
+    document.getElementById('grid-back-btn')?.addEventListener('click', () => history.back());
+    document.getElementById('back-btn')?.addEventListener('click', () => history.back());
+    const hamburger = document.getElementById('hamburger-btn');
+    const panel = document.getElementById('nav-menu-panel');
+    hamburger?.addEventListener('click', () => {
+        const open = hamburger.getAttribute('aria-expanded') === 'true';
+        hamburger.setAttribute('aria-expanded', String(!open));
+        hamburger.classList.toggle('open');
+        panel?.classList.toggle('open-panel');
     });
 }
 
-// ==========================================
-// 5. SEARCH ENGINE
-// ==========================================
-function initSearchEngine() {
-    const searchTrigger = document.getElementById('search-icon-trigger');
-    const searchWrapper = searchTrigger.parentElement;
+function initPreferences() {
+    const adultToggle = document.getElementById('adult-content-toggle');
+    const languageSelect = document.getElementById('title-language-select');
+    if (adultToggle) adultToggle.checked = adultContentEnabled;
+    if (languageSelect) languageSelect.value = titleLanguage;
 
-    searchTrigger.addEventListener('click', () => {
-        searchWrapper.classList.toggle('open');
-        if (searchWrapper.classList.contains('open')) searchInput.focus();
+    adultToggle?.addEventListener('change', async event => {
+        adultContentEnabled = event.target.checked;
+        localStorage.setItem('anizoneAdultEnabled', String(adultContentEnabled));
+        if (adultContentEnabled && selectedDiscoverAdult === 'regular') selectedDiscoverAdult = 'both';
+        if (!adultContentEnabled) selectedDiscoverAdult = 'regular';
+        localStorage.setItem('anizoneDiscoverAdultMode', selectedDiscoverAdult);
+        syncDiscoverAdultFilter();
+        await loadDashboardRows();
+        if (currentActiveRowTarget && !document.getElementById('view-results')?.classList.contains('hidden')) fetchExpandedGridData();
     });
-
-    let typingTimer;
-    searchInput.addEventListener('input', () => {
-        const query = searchInput.value.trim();
-        clearSearchBtn.classList.toggle('hidden', query.length === 0);
-        if (query.length === 0) { suggestionsDropdown.classList.add('hidden'); return; }
-        clearTimeout(typingTimer);
-        typingTimer = setTimeout(() => {
-            if (query.length >= 2) fetchSearchSuggestions(query);
-        }, 300);
-    });
-
-    searchInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            const query = searchInput.value.trim();
-            if (query.length > 0) {
-                suggestionsDropdown.classList.add('hidden');
-                executeGlobalSearch(query, 1);
-            }
+    languageSelect?.addEventListener('change', event => {
+        titleLanguage = event.target.value;
+        localStorage.setItem('anizoneTitleLanguage', titleLanguage);
+        loadDashboardRows();
+        if (currentDetailAnime && !document.getElementById('view-details')?.classList.contains('hidden')) {
+            renderAnimeDetails(currentDetailAnime);
         }
+        if (!document.getElementById('view-history')?.classList.contains('hidden')) renderHistoryLogGrid();
+        if (currentActiveRowTarget && !document.getElementById('view-results')?.classList.contains('hidden')) fetchExpandedGridData();
     });
+}
 
-    clearSearchBtn.addEventListener('click', () => {
-        searchInput.value = "";
+function initSearchEngine() {
+    const trigger = document.getElementById('search-icon-trigger');
+    const wrapper = trigger?.parentElement;
+    trigger?.addEventListener('click', () => {
+        wrapper?.classList.toggle('open');
+        if (wrapper?.classList.contains('open')) searchInput?.focus();
+    });
+    let timer;
+    searchInput?.addEventListener('input', () => {
+        const query = searchInput.value.trim();
+        clearSearchBtn?.classList.toggle('hidden', !query);
+        suggestionsDropdown?.classList.add('hidden');
+        clearTimeout(timer);
+        suggestionController?.abort();
+        if (query.length >= 2) timer = setTimeout(() => fetchSearchSuggestions(query), 300);
+    });
+    searchInput?.addEventListener('keydown', event => {
+        if (event.key !== 'Enter') return;
+        const query = searchInput.value.trim();
+        if (query) executeGlobalSearch(query, 1);
+    });
+    clearSearchBtn?.addEventListener('click', () => {
+        searchInput.value = '';
         clearSearchBtn.classList.add('hidden');
         suggestionsDropdown.classList.add('hidden');
         searchInput.focus();
     });
-
-    document.addEventListener('click', (e) => {
-        if (!searchWrapper.contains(e.target)) suggestionsDropdown.classList.add('hidden');
+    document.addEventListener('click', event => {
+        if (!wrapper?.contains(event.target)) suggestionsDropdown?.classList.add('hidden');
     });
 }
-
-async function fetchSearchSuggestions(query) {
+async function fetchSearchSuggestions(queryText) {
+    suggestionController?.abort();
+    suggestionController = new AbortController();
     try {
-        const response = await fetch(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(query)}&limit=6&sfw=true`);
-        if (!response.ok) return;
-        const result = await response.json();
-        if (!result?.data?.length) { suggestionsDropdown.classList.add('hidden'); return; }
-
-        suggestionsDropdown.innerHTML = "";
-        result.data.forEach(anime => {
-            const item = document.createElement('div');
-            item.className = 'suggestion-item';
-            item.innerHTML = `
-                <span>${escapeHtml(anime.title)}</span>
-                <span class="sug-score">${anime.score ? '★ ' + parseFloat(anime.score).toFixed(1) : 'N/A'}</span>
-            `;
-            item.addEventListener('click', () => {
-                suggestionsDropdown.classList.add('hidden');
-                viewSingleAnime(anime.mal_id);
-            });
-            suggestionsDropdown.appendChild(item);
+        const [mediaData, studioData] = await Promise.all([
+            searchAnime(queryText, 1, 6, {}, suggestionController.signal),
+            findStudios(queryText, 3, suggestionController.signal).catch(() => ({ Page: { studios: [] } })),
+        ]);
+        const anime = mediaData?.Page?.media || [];
+        const studios = studioData?.Page?.studios || [];
+        if (!anime.length && !studios.length) return;
+        suggestionsDropdown.innerHTML = '';
+        anime.forEach(item => {
+            const row = document.createElement('div');
+            row.className = 'suggestion-item';
+            const alt = secondaryTitle(item);
+            row.innerHTML = `<span><strong>${escapeHtml(displayTitle(item))}</strong>${alt ? `<small>${escapeHtml(alt)}</small>` : ''}</span><span class="sug-score">${item.averageScore ? `★ ${(item.averageScore / 10).toFixed(1)}` : 'N/A'}</span>`;
+            row.addEventListener('click', () => { suggestionsDropdown.classList.add('hidden'); viewSingleAnime(item.id); });
+            suggestionsDropdown.appendChild(row);
+        });
+        studios.forEach(studio => {
+            const row = document.createElement('div');
+            row.className = 'suggestion-item studio-suggestion';
+            row.innerHTML = `<span><strong>${escapeHtml(studio.name)}</strong><small>Studio</small></span><span class="sug-score">Studio</span>`;
+            row.addEventListener('click', () => { suggestionsDropdown.classList.add('hidden'); viewStudioGrid(studio.id, studio.name); });
+            suggestionsDropdown.appendChild(row);
         });
         suggestionsDropdown.classList.remove('hidden');
-    } catch (err) {
-        console.error("Suggestions error:", err);
+    } catch (error) {
+        if (error.name !== 'AbortError') console.error('Suggestion error:', error);
     }
 }
 
-// ==========================================
-// 6. DASHBOARD ROWS
-// ==========================================
 async function loadDashboardRows() {
     showLoading(true);
-    try {
-        // Row 1: Trending (current season)
-        const trendingRes = await fetch('https://api.jikan.moe/v4/seasons/now?limit=20&sfw=true');
-        const trendingData = await trendingRes.json();
-        renderSliderTrack('row-trending', trendingData.data);
-
-        if (trendingData.data?.length > 0) {
-            setupHeroBillboard(trendingData.data);
-        }
-
-        await delay(500);
-
-        // Row 2: Top Rated
-        const topRes = await fetch('https://api.jikan.moe/v4/top/anime?limit=20&type=tv&sfw=true');
-        const topData = await topRes.json();
-        renderSliderTrack('row-top', topData.data);
-
-        await delay(500);
-
-        // Row 3: Discover
-        refreshDiscoverRow();
-
-    } catch (err) {
-        console.error("Dashboard load error:", err);
-        showLoading(false);
-    } finally {
-        showLoading(false);
+    const trendPromise = getTrending(1, 20).then(data => {
+        const list = data.Page.media || [];
+        renderSliderTrack('row-trending', list);
+        setupHeroBillboard(list);
+    }).catch(error => renderRowError('row-trending', error, loadDashboardRows));
+    const topPromise = getTopRated(1, 20).then(data => renderSliderTrack('row-top', data.Page.media || []))
+        .catch(error => renderRowError('row-top', error, loadDashboardRows));
+    const discoverPromise = refreshDiscoverRow();
+    await Promise.allSettled([trendPromise, topPromise, discoverPromise]);
+    showLoading(false);
+}
+function renderRowError(trackId, error, retry) {
+    console.error(trackId, error);
+    const track = document.getElementById(trackId);
+    if (!track) return;
+    track.innerHTML = `<div class="empty-state api-error">Unable to load this section.<button class="inline-retry-btn">Retry</button></div>`;
+    track.querySelector('.inline-retry-btn')?.addEventListener('click', retry);
+}
+function renderSliderTrack(trackId, dataset) {
+    const track = document.getElementById(trackId);
+    if (!track) return;
+    track.innerHTML = '';
+    if (!dataset?.length) {
+        track.innerHTML = '<div class="empty-state">No matching anime found.</div>';
+        return;
     }
+    dataset.forEach(anime => track.appendChild(createAnimeCard(anime)));
+}
+function createAnimeCard(anime, isHistory = false) {
+    const card = document.createElement('div');
+    card.className = 'anime-card';
+    const title = displayTitle(anime);
+    const alt = secondaryTitle(anime);
+    card.innerHTML = `<img src="${escapeHtml(imageUrl(anime))}" alt="${escapeHtml(title)}" loading="lazy">${anime.isAdult ? '<span class="adult-card-badge">18+</span>' : ''}<div class="anime-card-overlay"></div><div class="anime-card-title">${escapeHtml(title)}${alt ? `<span>${escapeHtml(alt)}</span>` : ''}</div>`;
+    if (anime.isAdult) card.classList.add('adult-card');
+    if (isHistory) {
+        const button = document.createElement('button');
+        button.className = 'card-eraser-btn';
+        button.title = 'Remove';
+        button.textContent = '✕';
+        button.addEventListener('click', event => { event.stopPropagation(); removeAnimeFromHistoryLog(anime.id); });
+        card.appendChild(button);
+    }
+    card.addEventListener('click', () => viewSingleAnime(anime.id));
+    return card;
 }
 
 function setupHeroBillboard(animeList) {
-    if (!animeList?.length) return;
-    heroSlides = dedupeAnimeList(animeList).slice(0, 10);
-    if (!heroSlides.length) return;
+    heroSlides = (animeList || []).slice(0, 10);
     heroSlideIndex = 0;
-
     renderHeroIndicators();
     renderHeroSlide(0);
     startHeroAutoRotate();
 }
-
 function startHeroAutoRotate() {
-    if (heroInterval) clearInterval(heroInterval);
-    if (heroSlides.length <= 1) return;
-    heroInterval = setInterval(() => {
-        heroSlideIndex = (heroSlideIndex + 1) % heroSlides.length;
-        renderHeroSlide(heroSlideIndex);
-    }, 6000);
+    clearInterval(heroInterval);
+    if (heroSlides.length > 1) heroInterval = setInterval(() => goToHeroSlide(1), 6000);
 }
-
 function goToHeroSlide(delta) {
     if (!heroSlides.length) return;
     heroSlideIndex = (heroSlideIndex + delta + heroSlides.length) % heroSlides.length;
     renderHeroSlide(heroSlideIndex);
     startHeroAutoRotate();
 }
-
 function initHeroControls() {
     document.getElementById('hero-next-btn')?.addEventListener('click', () => goToHeroSlide(1));
     document.getElementById('hero-prev-btn')?.addEventListener('click', () => goToHeroSlide(-1));
 }
-
 function renderHeroIndicators() {
-    const wrap = document.getElementById('hero-indicators');
-    if (!wrap) return;
-    wrap.innerHTML = "";
-    heroSlides.forEach((_, i) => {
+    const container = document.getElementById('hero-indicators');
+    if (!container) return;
+    container.innerHTML = '';
+    heroSlides.forEach((_, index) => {
         const dot = document.createElement('button');
         dot.className = 'hero-dot';
-        dot.setAttribute('aria-label', `Show trending title ${i + 1}`);
-        dot.addEventListener('click', () => {
-            heroSlideIndex = i;
-            renderHeroSlide(i);
-            startHeroAutoRotate();
-        });
-        wrap.appendChild(dot);
+        dot.setAttribute('aria-label', `Trending title ${index + 1}`);
+        dot.addEventListener('click', () => { heroSlideIndex = index; renderHeroSlide(index); startHeroAutoRotate(); });
+        container.appendChild(dot);
     });
 }
-
 function renderHeroSlide(index) {
     const anime = heroSlides[index];
     if (!anime) return;
-    const hero = document.getElementById('home-hero');
-    const imgUrl = anime.images?.jpg?.large_image_url || anime.images?.jpg?.image_url || '';
-    hero.style.backgroundImage = `url('${imgUrl}')`;
-    document.getElementById('hero-title').textContent = anime.title || '';
-    document.getElementById('hero-synopsis').textContent = anime.synopsis || "No synopsis available.";
+    const background = anime.bannerImage || imageUrl(anime);
+    const layers = [document.getElementById('hero-bg-a'), document.getElementById('hero-bg-b')];
+    const nextLayerIndex = heroBackgroundLayer === 0 ? 1 : 0;
+    const currentLayer = layers[heroBackgroundLayer];
+    const nextLayer = layers[nextLayerIndex];
 
-    const rankBadge = document.querySelector('.hero-badge.top-10');
-    if (rankBadge) rankBadge.textContent = `#${index + 1} Trending`;
+    const applySlide = () => {
+        if (nextLayer) {
+            nextLayer.style.backgroundImage = `url('${background}')`;
+            nextLayer.classList.add('active');
+            currentLayer?.classList.remove('active');
+            heroBackgroundLayer = nextLayerIndex;
+        }
+        document.getElementById('hero-title').textContent = displayTitle(anime, true);
+        document.getElementById('hero-synopsis').textContent = stripHtml(anime.description) || 'No synopsis available.';
+        document.querySelector('.hero-badge.top-10').textContent = `#${index + 1} Trending`;
+        document.querySelector('.hero-badge.new-season').textContent = anime.seasonYear ? `${anime.season || ''} ${anime.seasonYear}`.trim() : formatStatus(anime.status);
+        const watchTitle = anime.title?.english || anime.title?.romaji || '';
+        document.getElementById('hero-watch-btn').onclick = () => window.open(`https://anikototv.to/filter?keyword=${encodeURIComponent(watchTitle)}`, '_blank', 'noopener,noreferrer');
+        document.getElementById('hero-info-btn').onclick = () => viewSingleAnime(anime.id);
+        document.querySelectorAll('#hero-indicators .hero-dot').forEach((dot, i) => dot.classList.toggle('active', i === index));
+    };
 
-    const anikotoTitle = anime.title_english || anime.title || '';
-    const anikotoUrl = `https://anikototv.to/filter?keyword=${encodeURIComponent(anikotoTitle)}`;
-    document.getElementById('hero-watch-btn').onclick = () => window.open(anikotoUrl, '_blank', 'noopener,noreferrer');
-    document.getElementById('hero-info-btn').onclick = () => viewSingleAnime(anime.mal_id);
-
-    document.querySelectorAll('#hero-indicators .hero-dot').forEach((dot, i) => {
-        dot.classList.toggle('active', i === index);
-    });
+    if (!background) { applySlide(); return; }
+    const preload = new Image();
+    preload.onload = applySlide;
+    preload.onerror = applySlide;
+    preload.src = background;
 }
 
-function renderSliderTrack(trackId, dataset) {
-    const track = document.getElementById(trackId);
-    if (!track) return;
-    track.innerHTML = "";
-    const deduped = dedupeAnimeList(dataset);
-    if (!deduped.length) {
-        track.innerHTML = '<div class="empty-state">No content found.</div>';
-        return;
-    }
-    deduped.forEach(anime => track.appendChild(createAnimeCard(anime)));
-}
-
-function createAnimeCard(anime, isHistoryView = false) {
-    const card = document.createElement('div');
-    card.className = 'anime-card';
-
-    const img = anime.images?.jpg?.large_image_url
-        || anime.images?.jpg?.image_url
-        || anime.images?.webp?.large_image_url
-        || '';
-
-    card.innerHTML = `
-        <img src="${img}" alt="${escapeHtml(anime.title)}" loading="lazy">
-        <div class="anime-card-overlay"></div>
-        <div class="anime-card-title">${escapeHtml(anime.title)}</div>
-    `;
-
-    if (isHistoryView) {
-        const eraser = document.createElement('button');
-        eraser.className = 'card-eraser-btn';
-        eraser.title = 'Remove from list';
-        eraser.innerHTML = '✕';
-        eraser.addEventListener('click', (e) => {
-            e.stopPropagation();
-            removeAnimeFromHistoryLog(anime.mal_id);
-        });
-        card.appendChild(eraser);
-    }
-
-    card.addEventListener('click', () => viewSingleAnime(anime.mal_id));
-    return card;
-}
-
-// ==========================================
-// 7. DISCOVER FILTERS
-// ==========================================
 function initDiscoverFilters() {
     populateYearFilterOptions();
-    ['home-filter-genre', 'filter-year', 'filter-season', 'discover-type', 'discover-status', 'discover-rating']
-        .forEach(enhanceSelectWithCustomDropdown);
-
-    const bindings = [
-        ['home-filter-genre', v => { selectedDiscoverGenre = v; }],
-        ['filter-year',       v => { selectedDiscoverYear = v; }],
-        ['filter-season',     v => { selectedDiscoverSeason = v; }],
-        ['discover-type',     v => { selectedDiscoverType = v; }],
-        ['discover-status',   v => { selectedDiscoverStatus = v; }],
-        ['discover-rating',   v => { selectedDiscoverRating = v; }],
-    ];
-    bindings.forEach(([id, setter]) => {
-        document.getElementById(id)?.addEventListener('change', (e) => {
-            setter(e.target.value);
-            refreshDiscoverRow();
-        });
-    });
+    const genre = document.getElementById('home-filter-genre');
+    const year = document.getElementById('filter-year');
+    const season = document.getElementById('filter-season');
+    const type = document.getElementById('discover-type');
+    const status = document.getElementById('discover-status');
+    const rating = document.getElementById('discover-rating');
+    const adult = document.getElementById('discover-adult-filter');
+    if (genre) genre.value = selectedDiscoverGenre;
+    if (year) year.value = selectedDiscoverYear;
+    if (season) season.value = selectedDiscoverSeason;
+    if (type) type.value = selectedDiscoverType;
+    if (status) status.value = selectedDiscoverStatus;
+    if (rating) rating.value = selectedDiscoverRating;
+    if (adult) adult.value = selectedDiscoverAdult;
+    syncDiscoverAdultFilter();
+    [
+        [genre, value => selectedDiscoverGenre = value],
+        [year, value => selectedDiscoverYear = value],
+        [season, value => selectedDiscoverSeason = value],
+        [type, value => selectedDiscoverType = value],
+        [status, value => selectedDiscoverStatus = value],
+        [rating, value => selectedDiscoverRating = value],
+        [adult, value => { selectedDiscoverAdult = value; localStorage.setItem('anizoneDiscoverAdultMode', value); }],
+    ].forEach(([element, setter]) => element?.addEventListener('change', event => { setter(event.target.value); refreshDiscoverRow(); }));
+    document.getElementById('reset-discover-filters')?.addEventListener('click', resetDiscoverFilters);
 }
-
 function populateYearFilterOptions() {
-    const yearSelect = document.getElementById('filter-year');
-    if (!yearSelect) return;
-    const currentYear = new Date().getFullYear();
-    let optionsHtml = '';
-    for (let y = currentYear; y >= 1999; y--) {
-        optionsHtml += `<option value="${y}">${y}</option>`;
-    }
-    yearSelect.innerHTML = optionsHtml;
-    yearSelect.value = selectedDiscoverYear;
+    const select = document.getElementById('filter-year');
+    if (!select) return;
+    let options = '';
+    for (let year = new Date().getFullYear() + 1; year >= 1960; year--) options += `<option value="${year}">${year}</option>`;
+    select.innerHTML = options;
+}
+function syncDiscoverAdultFilter() {
+    const select = document.getElementById('discover-adult-filter');
+    if (!select) return;
+    select.classList.toggle('hidden', !adultContentEnabled);
+    select.disabled = !adultContentEnabled;
+    select.value = selectedDiscoverAdult;
 }
 
-// Native <select> dropdowns with very long option lists (60+ genres, 25+ years)
-// render inconsistently inside this app's embedded webview — option text can
-// overflow/scroll oddly since we don't control the native popup at all. This
-// swaps the select for a panel we fully own (fixed max-height, our own
-// scrolling, our own z-index) while keeping the original <select> in the DOM
-// as the source of truth, so every existing 'change' listener keeps working.
-let customDropdownGlobalCloseBound = false;
-function enhanceSelectWithCustomDropdown(selectId) {
-    const select = document.getElementById(selectId);
-    if (!select || select.dataset.enhanced) return;
-    select.dataset.enhanced = 'true';
-
-    const wrap = document.createElement('div');
-    wrap.className = 'custom-select-wrap';
-
-    const trigger = document.createElement('button');
-    trigger.type = 'button';
-    trigger.className = `${select.className} custom-select-trigger`;
-    trigger.textContent = select.options[select.selectedIndex]?.text || '';
-
-    const panel = document.createElement('div');
-    panel.className = 'custom-select-panel hidden';
-
-    Array.from(select.options).forEach(opt => {
-        const item = document.createElement('div');
-        item.className = `custom-select-option${opt.value === select.value ? ' selected' : ''}`;
-        item.textContent = opt.text;
-        item.addEventListener('click', () => {
-            select.value = opt.value;
-            trigger.textContent = opt.text;
-            panel.querySelectorAll('.custom-select-option').forEach(o => o.classList.remove('selected'));
-            item.classList.add('selected');
-            panel.classList.add('hidden');
-            select.dispatchEvent(new Event('change', { bubbles: true }));
-        });
-        panel.appendChild(item);
-    });
-
-    trigger.addEventListener('click', (e) => {
-        e.stopPropagation();
-        document.querySelectorAll('.custom-select-panel').forEach(p => { if (p !== panel) p.classList.add('hidden'); });
-        panel.classList.toggle('hidden');
-    });
-
-    select.parentNode.insertBefore(wrap, select);
-    wrap.appendChild(trigger);
-    wrap.appendChild(panel);
-    wrap.appendChild(select);
-    select.classList.add('visually-hidden-select');
-
-    if (!customDropdownGlobalCloseBound) {
-        document.addEventListener('click', () => {
-            document.querySelectorAll('.custom-select-panel').forEach(p => p.classList.add('hidden'));
-        });
-        customDropdownGlobalCloseBound = true;
-    }
+function resetDiscoverFilters() {
+    selectedDiscoverGenre = '';
+    selectedDiscoverYear = String(new Date().getFullYear());
+    selectedDiscoverSeason = getCurrentSeason();
+    selectedDiscoverType = '';
+    selectedDiscoverStatus = '';
+    selectedDiscoverRating = '';
+    selectedDiscoverAdult = adultContentEnabled ? 'both' : 'regular';
+    localStorage.setItem('anizoneDiscoverAdultMode', selectedDiscoverAdult);
+    document.getElementById('home-filter-genre').value = '';
+    document.getElementById('filter-year').value = selectedDiscoverYear;
+    document.getElementById('filter-season').value = selectedDiscoverSeason;
+    document.getElementById('discover-type').value = '';
+    document.getElementById('discover-status').value = '';
+    document.getElementById('discover-rating').value = '';
+    const adultFilter = document.getElementById('discover-adult-filter');
+    if (adultFilter) adultFilter.value = selectedDiscoverAdult;
+    refreshDiscoverRow();
 }
-
 async function refreshDiscoverRow() {
     const track = document.getElementById('row-discover');
     if (!track) return;
     track.innerHTML = '<div class="spinner"></div>';
-
     try {
-        let url;
-
-        // FIX: When both year and season are set, use the seasons endpoint which is reliable
-        if (selectedDiscoverYear && selectedDiscoverSeason && !selectedDiscoverGenre && !selectedDiscoverType && !selectedDiscoverStatus) {
-            url = `https://api.jikan.moe/v4/seasons/${selectedDiscoverYear}/${selectedDiscoverSeason}?limit=20&sfw=true`;
-        } else {
-            // General anime endpoint with all filters
-            url = `https://api.jikan.moe/v4/anime?limit=20&page=1&sfw=true`;
-            if (selectedDiscoverGenre) url += `&genres=${selectedDiscoverGenre}`;
-            if (selectedDiscoverYear) url += `&start_date=${selectedDiscoverYear}-01-01&end_date=${selectedDiscoverYear}-12-31`;
-            if (selectedDiscoverType) url += `&type=${selectedDiscoverType}`;
-            if (selectedDiscoverStatus) url += `&status=${selectedDiscoverStatus}`;
-            if (selectedDiscoverRating) url += `&rating=${selectedDiscoverRating}`;
-        }
-
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-
-        if (!data?.data?.length) {
-            track.innerHTML = '<div class="empty-state">No anime found with these filters. Try different options.</div>';
-            return;
-        }
-        renderSliderTrack('row-discover', data.data);
-    } catch (err) {
-        console.error("Discover row error:", err);
-        track.innerHTML = '<div class="empty-state">Failed to load discover content. Please try again.</div>';
+        const data = await getDiscover(1, 20);
+        renderSliderTrack('row-discover', data.Page.media || []);
+    } catch (error) {
+        renderRowError('row-discover', error, refreshDiscoverRow);
     }
 }
 
-// ==========================================
-// 8. SLIDERS
-// ==========================================
 function initSliders() {
-    document.querySelectorAll('.see-more-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const target = btn.getAttribute('data-target');
-            if (target) expandRowToGrid(target);
-        });
-    });
-
+    document.querySelectorAll('.see-more-btn').forEach(button => button.addEventListener('click', () => expandRowToGrid(button.dataset.target)));
     document.querySelectorAll('.slider-container').forEach(container => {
         const track = container.querySelector('.slider-track');
-        const leftArrow = container.querySelector('.left-arrow');
-        const rightArrow = container.querySelector('.right-arrow');
-        if (!track || !leftArrow || !rightArrow) return;
-        leftArrow.addEventListener('click', () => track.scrollBy({ left: -500, behavior: 'smooth' }));
-        rightArrow.addEventListener('click', () => track.scrollBy({ left: 500, behavior: 'smooth' }));
+        container.querySelector('.left-arrow')?.addEventListener('click', () => track?.scrollBy({ left: -500, behavior: 'smooth' }));
+        container.querySelector('.right-arrow')?.addEventListener('click', () => track?.scrollBy({ left: 500, behavior: 'smooth' }));
     });
 }
-
-// ==========================================
-// 9. EXPANDED GRID
-// ==========================================
-
-// FIX: Global filter listeners — only in one place, not nested in DOMContentLoaded
 function initGlobalFilterListeners() {
-    ['filter-type','filter-status','filter-rating','filter-order'].forEach(id => {
-        enhanceSelectWithCustomDropdown(id);
-        document.getElementById(id)?.addEventListener('change', () => {
-            // Only re-fetch if we're actually in the results view with a valid target
-            if (currentActiveRowTarget && document.getElementById('view-results') && !document.getElementById('view-results').classList.contains('hidden')) {
-                currentPage = 1;
-                fetchExpandedGridData();
-            }
-        });
-    });
-
+    ['filter-type', 'filter-status', 'filter-rating', 'filter-order'].forEach(id => document.getElementById(id)?.addEventListener('change', () => {
+        if (currentActiveRowTarget && !document.getElementById('view-results')?.classList.contains('hidden')) {
+            currentPage = 1;
+            fetchExpandedGridData();
+        }
+    }));
 }
-
-function expandRowToGrid(targetRowKey) {
-    currentActiveRowTarget = targetRowKey;
+function expandRowToGrid(target) {
+    if (!target) return;
+    currentActiveRowTarget = target;
     currentPage = 1;
-
-    const gridTitle = document.getElementById('grid-title');
-    const globalFilters = document.getElementById('global-filters-container');
-
-    if (targetRowKey === 'trending' || targetRowKey === 'top') {
-        globalFilters.classList.add('hidden');
-        gridTitle.textContent = targetRowKey === 'trending' ? 'Trending Now — Full List' : 'Top Rated Masterpieces';
-    } else {
-        globalFilters.classList.remove('hidden');
-        gridTitle.textContent = 'Discover — Advanced Grid';
-    }
-
-    syncViewRoute('view-results', true, { target: targetRowKey, page: 1 });
+    configureResultsHeader(target);
+    syncViewRoute('view-results', true, { target, page: 1 });
     fetchExpandedGridData();
 }
-
-// Studio name in the detail view links here — grid of everything that studio made.
+function executeGlobalSearch(query, page = 1) {
+    currentSearchQuery = query.trim();
+    currentActiveRowTarget = 'search';
+    currentPage = page;
+    suggestionsDropdown?.classList.add('hidden');
+    configureResultsHeader('search');
+    syncViewRoute('view-results', true, { target: 'search', query: currentSearchQuery, page });
+    fetchExpandedGridData();
+}
 function viewStudioGrid(studioId, studioName) {
-    if (!studioId) return;
     currentActiveRowTarget = 'studio';
     selectedStudioId = studioId;
-    selectedStudioName = studioName || '';
+    selectedStudioName = studioName;
     currentPage = 1;
-
-    document.getElementById('grid-title').textContent = `Studio: ${selectedStudioName}`;
-    document.getElementById('global-filters-container').classList.remove('hidden');
-    syncViewRoute('view-results', true, { target: 'studio', studioId, studioName: selectedStudioName, page: 1 });
+    configureResultsHeader('studio');
+    syncViewRoute('view-results', true, { target: 'studio', studioId, studioName, page: 1 });
     fetchExpandedGridData();
 }
-
 async function fetchExpandedGridData() {
-    // Guard: must have a valid target
-    if (!currentActiveRowTarget) return;
-
-    showLoading(true);
+    const token = ++resultsRequestToken;
     const grid = document.getElementById('search-results-grid');
-    if (!grid) { showLoading(false); return; }
-
-    const filterType   = document.getElementById('filter-type')?.value || '';
-    const filterStatus = document.getElementById('filter-status')?.value || '';
-    const filterRating = document.getElementById('filter-rating')?.value || '';
-    const filterOrder  = document.getElementById('filter-order')?.value || 'default';
-
-    // A new target/query/filter combo resets the virtual-pagination session;
-    // plain Prev/Next page changes keep it so already-built pages are reused
-    // from cache instead of re-fetched.
-    const sessionKey = JSON.stringify({
-        target: currentActiveRowTarget, query: currentSearchQuery, studioId: selectedStudioId,
-        genre: selectedDiscoverGenre, year: selectedDiscoverYear, season: selectedDiscoverSeason,
-        dType: selectedDiscoverType, dStatus: selectedDiscoverStatus, dRating: selectedDiscoverRating,
-        filterType, filterStatus, filterRating, filterOrder
-    });
-
-    if (sessionKey !== resultsSessionKey) {
-        resultsSessionKey = sessionKey;
-        resultsPageCache = new Map();
-        resultsBuffer = [];
-        resultsSeenIds = new Set();
-        resultsNextRawPage = 1;
-        resultsApiExhausted = false;
-        resultsMaxBuiltPage = 0;
-        resultsMeta = { total: 0, lastVisiblePage: null };
-    }
-
-    try {
-        if (!resultsPageCache.has(currentPage)) {
-            while (resultsBuffer.length < searchPageSize && !resultsApiExhausted) {
-                const rawPage = resultsNextRawPage;
-                const raw = await fetchRawResultsPage(rawPage, filterType, filterStatus, filterRating, filterOrder);
-                resultsNextRawPage++;
-
-                if (!raw?.data?.length) {
-                    resultsApiExhausted = true;
-                    break;
-                }
-
-                if (rawPage === 1) {
-                    resultsMeta = {
-                        total: raw.pagination?.items?.total ?? raw.data.length,
-                        lastVisiblePage: raw.pagination?.last_visible_page ?? null
-                    };
-                }
-
-                raw.data.forEach(anime => {
-                    if (resultsSeenIds.has(anime.mal_id)) return;
-                    resultsSeenIds.add(anime.mal_id);
-                    resultsBuffer.push(anime);
-                });
-
-                if (!raw.pagination?.has_next_page) resultsApiExhausted = true;
-            }
-
-            const pageItems = resultsBuffer.splice(0, searchPageSize);
-            resultsPageCache.set(currentPage, pageItems);
-            resultsMaxBuiltPage = Math.max(resultsMaxBuiltPage, currentPage);
-        }
-
-        renderResultsPage(grid, resultsPageCache.get(currentPage) || []);
-
-    } catch (err) {
-        console.error("Grid load error:", err);
-        grid.innerHTML = `<div class="empty-state">Failed to load results. The API may be rate-limited — wait a moment and try again.</div>`;
-    } finally {
-        showLoading(false);
-    }
-}
-
-// Builds and fetches one raw Jikan page for the current target. rawPage is
-// the API's own page counter, decoupled from currentPage (our virtual,
-// post-dedupe page) — fetchExpandedGridData may need several raw pages to
-// fill a single 24-item display page.
-async function fetchRawResultsPage(rawPage, filterType, filterStatus, filterRating, filterOrder) {
-    let url = "";
-
-    if (currentActiveRowTarget === 'trending') {
-        url = `https://api.jikan.moe/v4/seasons/now?page=${rawPage}&limit=${searchPageSize}&sfw=true`;
-
-    } else if (currentActiveRowTarget === 'top') {
-        url = `https://api.jikan.moe/v4/top/anime?page=${rawPage}&limit=${searchPageSize}&type=tv&sfw=true`;
-
-    } else if (currentActiveRowTarget === 'discover') {
-        if (selectedDiscoverYear && selectedDiscoverSeason && !selectedDiscoverGenre && !selectedDiscoverType && !selectedDiscoverStatus) {
-            url = `https://api.jikan.moe/v4/seasons/${selectedDiscoverYear}/${selectedDiscoverSeason}?page=${rawPage}&limit=${searchPageSize}&sfw=true`;
-        } else {
-            url = `https://api.jikan.moe/v4/anime?page=${rawPage}&limit=${searchPageSize}&sfw=true`;
-            if (selectedDiscoverGenre) url += `&genres=${selectedDiscoverGenre}`;
-            if (selectedDiscoverYear) url += `&start_date=${selectedDiscoverYear}-01-01&end_date=${selectedDiscoverYear}-12-31`;
-            if (selectedDiscoverType) url += `&type=${selectedDiscoverType}`;
-            if (selectedDiscoverStatus) url += `&status=${selectedDiscoverStatus}`;
-            if (selectedDiscoverRating) url += `&rating=${selectedDiscoverRating}`;
-        }
-
-    } else if (currentActiveRowTarget === 'studio') {
-        url = `https://api.jikan.moe/v4/anime?producers=${selectedStudioId}&page=${rawPage}&limit=${searchPageSize}&sfw=true`;
-        if (filterType)   url += `&type=${filterType}`;
-        if (filterStatus) url += `&status=${filterStatus}`;
-        if (filterRating) url += `&rating=${filterRating}`;
-        if (filterOrder && filterOrder !== 'default') url += `&order_by=${filterOrder}&sort=desc`;
-
-    } else {
-        url = `https://api.jikan.moe/v4/anime?q=${encodeURIComponent(currentSearchQuery)}&page=${rawPage}&limit=${searchPageSize}&sfw=true`;
-        if (filterType)   url += `&type=${filterType}`;
-        if (filterStatus) url += `&status=${filterStatus}`;
-        if (filterRating) url += `&rating=${filterRating}`;
-        if (filterOrder && filterOrder !== 'default') url += `&order_by=${filterOrder}&sort=desc`;
-    }
-
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-    let result = await res.json();
-
-    // Jikan sometimes returns error objects
-    if (result.status && result.status !== 200) {
-        throw new Error(result.message || 'API error');
-    }
-
-    // Title search came up completely empty on the very first raw page — the
-    // search box advertises studio names too, so try matching the query
-    // against a producer/studio before giving up.
-    if (!result?.data?.length && currentActiveRowTarget === 'search' && rawPage === 1) {
-        const studioFallback = await trySearchByStudioName(currentSearchQuery, rawPage);
-        if (studioFallback?.data?.length) {
-            result = studioFallback;
-            document.getElementById('grid-title').textContent = `Search: "${currentSearchQuery}" (matched studio)`;
-        }
-    }
-
-    return result;
-}
-
-// Jikan's anime search only matches titles, not studios — when the title
-// search is empty, look up the query as a producer/studio name and pull
-// that studio's catalogue instead.
-async function trySearchByStudioName(query, page) {
-    try {
-        const prodRes = await fetch(`https://api.jikan.moe/v4/producers?q=${encodeURIComponent(query)}&limit=5`);
-        if (!prodRes.ok) return null;
-        const prodData = await prodRes.json();
-        const lowerQuery = query.trim().toLowerCase();
-        const match = prodData?.data?.find(p =>
-            (p.titles || []).some(t => (t.title || '').toLowerCase() === lowerQuery)
-        ) || prodData?.data?.[0];
-        if (!match) return null;
-
-        await delay(350);
-        const animeRes = await fetch(`https://api.jikan.moe/v4/anime?producers=${match.mal_id}&page=${page}&limit=${searchPageSize}&sfw=true`);
-        if (!animeRes.ok) return null;
-        return await animeRes.json();
-    } catch {
-        return null;
-    }
-}
-
-function renderResultsPage(grid, items) {
-    grid.innerHTML = "";
-
-    if (!items.length) {
-        grid.innerHTML = '<div class="empty-state">No matching titles found. Try adjusting your filters.</div>';
-        updatePaginationControls(false, resultsMeta.lastVisiblePage);
-        document.getElementById('results-count').textContent = '0 Titles';
-        return;
-    }
-
-    items.forEach(anime => grid.appendChild(createAnimeCard(anime)));
-
-    document.getElementById('results-count').textContent = `${Number(resultsMeta.total).toLocaleString()} Titles Found`;
-
-    hasNextPage = currentPage < resultsMaxBuiltPage || resultsBuffer.length > 0 || !resultsApiExhausted;
-    updatePaginationControls(hasNextPage, resultsMeta.lastVisiblePage);
-}
-
-function executeGlobalSearch(query, page = 1) {
-    // FIX: trim and validate query
-    const trimmed = query.trim();
-    if (!trimmed) return;
-
-    currentActiveRowTarget = "search";
-    currentSearchQuery = trimmed;
-    currentPage = page;
-
-    document.getElementById('grid-title').textContent = `Search: "${trimmed}"`;
-    document.getElementById('global-filters-container').classList.remove('hidden');
-    syncViewRoute('view-results', true, { target: 'search', query: trimmed, page });
-    fetchExpandedGridData();
-}
-
-function updatePaginationControls(hasMore, totalPages) {
-    const prevBtn = document.getElementById('prev-page-btn');
-    const nextBtn = document.getElementById('next-page-btn');
-    const indicator = document.getElementById('page-indicator');
-
-    prevBtn.disabled = currentPage === 1;
-    nextBtn.disabled = !hasMore;
-    indicator.textContent = totalPages ? `Page ${currentPage} of ${totalPages}` : `Page ${currentPage}`;
-
-    prevBtn.onclick = () => {
-        if (currentPage > 1) { currentPage--; fetchExpandedGridData(); window.scrollTo({ top: 0 }); }
-    };
-    nextBtn.onclick = () => {
-        if (hasMore) { currentPage++; fetchExpandedGridData(); window.scrollTo({ top: 0 }); }
-    };
-}
-
-// ==========================================
-// 10. SINGLE ANIME DETAIL VIEW
-// ==========================================
-async function viewSingleAnime(animeId, pushHistoryState = true) {
+    if (!grid || !currentActiveRowTarget) return;
     showLoading(true);
-
-    syncViewRoute('view-details', false);
-
-    // Always push a fresh entry (never replace) — drilling from one detail
-    // page into another (timeline node, cast VA role) must leave the prior
-    // detail page in history so the back button returns to it, not to
-    // whatever was open before the whole chain started.
-    if (pushHistoryState) {
-        history.pushState({ view: 'view-details', animeId }, "", "");
-    }
-
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-
+    grid.innerHTML = '<div class="spinner"></div>';
+    const filters = {
+        type: document.getElementById('filter-type')?.value || '',
+        status: document.getElementById('filter-status')?.value || '',
+        rating: document.getElementById('filter-rating')?.value || '',
+        order: document.getElementById('filter-order')?.value || 'default',
+    };
     try {
-        const response = await fetch(`https://api.jikan.moe/v4/anime/${animeId}/full`);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const result = await response.json();
-        const anime = result.data;
-        if (!anime) throw new Error("No anime data returned.");
-
-        const posterImg = anime.images?.jpg?.large_image_url || anime.images?.jpg?.image_url || '';
-        document.getElementById('detail-backdrop').style.backgroundImage = `url('${posterImg}')`;
-        document.getElementById('detail-poster').src = posterImg;
-        document.getElementById('detail-title').textContent = anime.title || '';
-        document.getElementById('detail-synopsis').textContent = anime.synopsis || "No synopsis available.";
-
-        document.getElementById('badge-score').textContent = anime.score ? `★ ${parseFloat(anime.score).toFixed(2)} / 10` : 'No Score';
-        document.getElementById('badge-year').textContent = anime.year || anime.aired?.prop?.from?.year || 'TBA';
-        document.getElementById('badge-rating').textContent = anime.rating || 'Unrated';
-        document.getElementById('badge-episodes').textContent = anime.episodes ? `${anime.episodes} Episodes` : 'Ongoing';
-        document.getElementById('badge-type').textContent = anime.type || 'TV';
-        document.getElementById('badge-status').textContent = anime.status || 'Unknown';
-        renderStudioLinks(anime.studios);
-
-        // FIX: Build streaming links — Anikoto search + MAL only, no other platforms
-        buildStreamingLinks(anime);
-
-        appendAnimeToClickHistoryLog(anime);
-
-        await delay(300);
-        fetchCastProfiles(animeId);
-        await delay(300);
-        buildFranchiseTimeline(animeId, anime.title, anime.aired?.from, anime.aired?.to);
-
-    } catch (err) {
-        console.error("Detail view error:", err);
-        showLoading(false);
+        let data;
+        if (currentActiveRowTarget === 'trending') data = await getTrending(currentPage, PAGE_SIZE);
+        else if (currentActiveRowTarget === 'top') data = await getTopRated(currentPage, PAGE_SIZE);
+        else if (currentActiveRowTarget === 'discover') data = await getDiscover(currentPage, PAGE_SIZE);
+        else if (currentActiveRowTarget === 'studio') data = await getStudioAnime(selectedStudioId, currentPage, PAGE_SIZE, filters);
+        else data = await searchAnime(currentSearchQuery, currentPage, PAGE_SIZE, filters);
+        if (token !== resultsRequestToken) return;
+        resultsPageInfo = data.Page.pageInfo;
+        renderResultsPage(grid, data.Page.media || [], resultsPageInfo);
+    } catch (error) {
+        if (token !== resultsRequestToken) return;
+        console.error('Grid error:', error);
+        grid.innerHTML = `<div class="empty-state api-error">${escapeHtml(error.message || 'Unable to load results.')}<button id="grid-retry-btn" class="inline-retry-btn">Retry</button></div>`;
+        document.getElementById('grid-retry-btn')?.addEventListener('click', fetchExpandedGridData);
+        updatePaginationControls(null);
     } finally {
-        showLoading(false);
+        if (token === resultsRequestToken) showLoading(false);
+    }
+}
+function renderResultsPage(grid, items, pageInfo) {
+    grid.innerHTML = '';
+    if (!items.length) grid.innerHTML = '<div class="empty-state">No matching anime found.</div>';
+    else items.forEach(item => grid.appendChild(createAnimeCard(item)));
+    document.getElementById('results-count').textContent = `${Number(pageInfo?.total || items.length).toLocaleString()} Titles`;
+    updatePaginationControls(pageInfo);
+}
+function updatePaginationControls(pageInfo) {
+    const previous = document.getElementById('prev-page-btn');
+    const next = document.getElementById('next-page-btn');
+    const indicator = document.getElementById('page-indicator');
+    if (!previous || !next || !indicator) return;
+    previous.disabled = !pageInfo || currentPage <= 1;
+    next.disabled = !pageInfo?.hasNextPage;
+    indicator.textContent = pageInfo ? `Page ${currentPage} of ${pageInfo.lastPage || currentPage}` : `Page ${currentPage}`;
+    previous.onclick = () => { if (currentPage > 1) { currentPage--; updateRoutePage(); fetchExpandedGridData(); window.scrollTo({ top: 0 }); } };
+    next.onclick = () => { if (pageInfo?.hasNextPage) { currentPage++; updateRoutePage(); fetchExpandedGridData(); window.scrollTo({ top: 0 }); } };
+}
+function updateRoutePage() {
+    const state = { ...(history.state || {}), page: currentPage };
+    history.replaceState(state, '', '');
+}
+
+async function viewSingleAnime(animeId, pushState = true) {
+    showLoading(true);
+    syncViewRoute('view-details', false);
+    if (pushState) history.pushState({ view: 'view-details', animeId }, '', '');
+    document.getElementById('characters-list').innerHTML = '<div class="spinner"></div>';
+    document.getElementById('chrono-timeline').innerHTML = '<div class="spinner"></div>';
+    try {
+        const data = await getAnimeDetails(animeId);
+        const anime = data.Media;
+        currentDetailAnime = anime;
+        if (!adultContentEnabled && anime.isAdult) throw new AniListError('Adult content is hidden. Enable the 18+ toggle to view this title.');
+        renderAnimeDetails(anime);
+        renderCastProfiles(anime.characters?.edges || []);
+        appendAnimeToClickHistoryLog(anime);
+        fetchFranchiseTimeline(anime);
+    } catch (error) {
+        console.error('Detail error:', error);
+        document.getElementById('detail-title').textContent = error.message || 'Unable to load anime details.';
+        document.getElementById('characters-list').innerHTML = '<div class="empty-state">Cast unavailable.</div>';
+        document.getElementById('chrono-timeline').innerHTML = '<div class="empty-state">Timeline unavailable.</div>';
+    } finally { showLoading(false); }
+}
+function renderAnimeDetails(anime) {
+    const poster = imageUrl(anime);
+    const backdrop = anime.bannerImage || poster;
+    document.getElementById('detail-backdrop').style.backgroundImage = `url('${backdrop}')`;
+    document.getElementById('detail-poster').src = poster;
+    const primary = displayTitle(anime);
+    const alternate = secondaryTitle(anime);
+    document.getElementById('detail-title').innerHTML = `${escapeHtml(primary)}${alternate ? `<span class="detail-alt-title">${escapeHtml(alternate)}</span>` : ''}`;
+    document.getElementById('detail-synopsis').textContent = stripHtml(anime.description) || 'No synopsis available.';
+    const adultWarning = document.getElementById('detail-adult-warning');
+    if (adultWarning) adultWarning.classList.toggle('hidden', !anime.isAdult);
+    document.getElementById('badge-score').textContent = anime.averageScore ? `★ AniList ${(anime.averageScore / 10).toFixed(1)} / 10` : 'AniList —';
+    const malBadge = document.getElementById('badge-mal-score');
+    if (malBadge) {
+        malBadge.textContent = anime.idMal ? 'MAL …' : 'MAL N/A';
+        malBadge.classList.toggle('hidden', !anime.idMal);
+    }
+    loadMalScoreIntoDetails(anime);
+    document.getElementById('badge-year').textContent = anime.seasonYear || anime.startDate?.year || 'TBA';
+    document.getElementById('badge-rating').textContent = anime.isAdult ? '18+' : 'General';
+    document.getElementById('badge-episodes').textContent = anime.episodes ? `${anime.episodes} Episodes` : 'Episodes TBA';
+    document.getElementById('badge-type').textContent = formatFormat(anime.format);
+    document.getElementById('badge-status').textContent = formatStatus(anime.status);
+    renderStudioLinks(anime.studios?.nodes || []);
+    buildStreamingLinks(anime);
+}
+
+async function loadMalScoreIntoDetails(anime) {
+    const badge = document.getElementById('badge-mal-score');
+    if (!badge || !anime?.idMal) return;
+    try {
+        const score = await fetchMalScore(anime.idMal);
+        if (currentDetailAnime?.id !== anime.id) return;
+        badge.textContent = score != null ? `★ MAL ${Number(score).toFixed(2)} / 10` : 'MAL N/A';
+    } catch (error) {
+        if (currentDetailAnime?.id !== anime.id) return;
+        badge.textContent = 'MAL unavailable';
+        console.warn('MAL score lookup failed:', error);
     }
 }
 
-// Each studio name is clickable — jumps to a grid of everything that studio made.
 function renderStudioLinks(studios) {
     const container = document.getElementById('detail-studio');
     container.innerHTML = '';
-    if (!studios?.length) {
-        container.textContent = 'Unknown Studio';
-        return;
-    }
-    studios.forEach((studio, idx) => {
+    if (!studios.length) { container.textContent = 'Unknown Studio'; return; }
+    studios.forEach((studio, index) => {
         const link = document.createElement('span');
         link.className = 'studio-link';
         link.textContent = studio.name;
-        link.addEventListener('click', () => viewStudioGrid(studio.mal_id, studio.name));
+        link.addEventListener('click', () => viewStudioGrid(studio.id, studio.name));
         container.appendChild(link);
-        if (idx < studios.length - 1) container.appendChild(document.createTextNode(', '));
+        if (index < studios.length - 1) container.appendChild(document.createTextNode(', '));
+    });
+}
+function buildStreamingLinks(anime) {
+    const title = anime.title?.english || anime.title?.romaji || '';
+    const malLink = anime.idMal
+        ? `<a class="watch-now-btn watch-myanimelist" href="https://myanimelist.net/anime/${Number(anime.idMal)}" target="_blank" rel="noopener noreferrer">ⓘ MyAnimeList</a>`
+        : '';
+    document.getElementById('streaming-links-container').innerHTML = `
+        <a class="watch-now-btn watch-custom" href="https://anikototv.to/filter?keyword=${encodeURIComponent(title)}" target="_blank" rel="noopener noreferrer">▶ Watch on Anikoto</a>
+        <a class="watch-now-btn watch-anilist" href="${escapeHtml(anime.siteUrl || `https://anilist.co/anime/${anime.id}`)}" target="_blank" rel="noopener noreferrer">ⓘ AniList</a>
+        ${malLink}`;
+}
+function updateCastLanguageControls() {
+    document.querySelectorAll('[data-cast-language]').forEach(button => {
+        button.classList.toggle('active', button.dataset.castLanguage === castLanguage);
+    });
+}
+function initCastLanguageToggle() {
+    document.querySelectorAll('[data-cast-language]').forEach(button => {
+        button.addEventListener('click', () => {
+            castLanguage = button.dataset.castLanguage;
+            localStorage.setItem('anizoneCastLanguage', castLanguage);
+            updateCastLanguageControls();
+            renderCastProfiles(currentCastEdges, false);
+        });
+    });
+    updateCastLanguageControls();
+}
+function renderCastProfiles(edges, remember = true) {
+    if (remember) currentCastEdges = edges || [];
+    const container = document.getElementById('characters-list');
+    container.innerHTML = '';
+    if (!currentCastEdges.length) { container.innerHTML = '<div class="empty-state">No cast data available.</div>'; return; }
+    currentCastEdges.slice(0, 18).forEach(edge => {
+        const character = edge.node;
+        const wantedLanguage = castLanguage === 'ENGLISH' ? 'English' : 'Japanese';
+        const actors = (edge.voiceActors || []).filter(actor =>
+            String(actor?.languageV2 || '').toLowerCase() === wantedLanguage.toLowerCase()
+        );
+        const actor = actors[0];
+        const languageLabel = castLanguage === 'ENGLISH' ? 'EN' : 'JP';
+        const card = document.createElement('div');
+        card.className = 'cast-card';
+        card.innerHTML = `${character.image?.large ? `<img class="cast-avatar" src="${escapeHtml(character.image.large)}" alt="${escapeHtml(character.name.full)}" loading="lazy">` : '<div class="cast-avatar-placeholder">👤</div>'}<div class="cast-info"><span class="cast-char-name">${escapeHtml(character.name.full)}</span><span class="cast-va-name${actor ? '' : ' no-va'}">${actor ? `${escapeHtml(actor.name.full)} (${languageLabel})` : `No ${languageLabel} voice actor data`}</span></div>`;
+        if (actor) card.querySelector('.cast-va-name').addEventListener('click', event => { event.stopPropagation(); openVoiceActorPortfolioPanel(actor.id, actor.name.full); });
+        container.appendChild(card);
     });
 }
 
-// FIX: Streaming links — Anikoto search link + MAL profile, no third-party platforms
-function buildStreamingLinks(anime) {
-    const streamingWrapper = document.getElementById('streaming-links-container');
-    streamingWrapper.innerHTML = "";
-
-    // Anikoto search link using the anime title as keyword
-    const searchTitle = (anime.title_english || anime.title || '').replace(/\s+/g, '+');
-    const anikotoUrl = `https://anikototv.to/filter?keyword=${encodeURIComponent(anime.title_english || anime.title || '')}`;
-
-    const anikotoBtn = document.createElement('a');
-    anikotoBtn.className = 'watch-now-btn watch-custom';
-    anikotoBtn.href = anikotoUrl;
-    anikotoBtn.target = '_blank';
-    anikotoBtn.rel = 'noopener noreferrer';
-    anikotoBtn.innerHTML = `
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-        Watch on Anikoto
-    `;
-    streamingWrapper.appendChild(anikotoBtn);
-
-    // MAL profile link
-    const malBtn = document.createElement('a');
-    malBtn.className = 'watch-now-btn watch-mal';
-    malBtn.href = anime.url || `https://myanimelist.net/anime/${anime.mal_id}`;
-    malBtn.target = '_blank';
-    malBtn.rel = 'noopener noreferrer';
-    malBtn.innerHTML = `
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        MyAnimeList Profile
-    `;
-    streamingWrapper.appendChild(malBtn);
-}
-
-// ==========================================
-// 11. CAST & CHARACTERS
-// ==========================================
-async function fetchCastProfiles(animeId) {
-    const container = document.getElementById('characters-list');
-    container.innerHTML = '<div class="spinner"></div>';
-
-    try {
-        // Retries on 429 — without this, anime that load right after a burst
-        // of other requests (relations/timeline calls) can silently come back
-        // empty even though Jikan actually has character data for them.
-        const res = await fetchJikanWithRetry(`https://api.jikan.moe/v4/anime/${animeId}/characters`);
-        if (!res || !res.ok) throw new Error(`HTTP ${res?.status}`);
-        const data = await res.json();
-
-        container.innerHTML = "";
-        if (!data?.data?.length) {
-            container.innerHTML = '<div class="empty-state">No cast data available for this title.</div>';
-            return;
-        }
-
-        const topCast = data.data.slice(0, 12);
-        topCast.forEach(item => {
-            const char = item.character;
-            const jaVA = item.voice_actors?.find(va => va.language === 'Japanese');
-
-            const card = document.createElement('div');
-            card.className = 'cast-card';
-
-            const charImg = char?.images?.jpg?.image_url || '';
-            const vaName = jaVA?.person?.name || '';
-            const vaId = jaVA?.person?.mal_id || null;
-
-            if (charImg) {
-                card.innerHTML = `
-                    <img class="cast-avatar" src="${charImg}" alt="${escapeHtml(char.name)}" loading="lazy">
-                    <div class="cast-info">
-                        <span class="cast-char-name">${escapeHtml(char.name)}</span>
-                        <span class="cast-va-name">${vaName ? escapeHtml(vaName) + ' (JP)' : 'No VA data'}</span>
-                    </div>
-                `;
-            } else {
-                card.innerHTML = `
-                    <div class="cast-avatar-placeholder">👤</div>
-                    <div class="cast-info">
-                        <span class="cast-char-name">${escapeHtml(char.name)}</span>
-                        <span class="cast-va-name">${vaName ? escapeHtml(vaName) + ' (JP)' : 'No VA data'}</span>
-                    </div>
-                `;
-            }
-
-            if (vaId && vaName) {
-                const vaEl = card.querySelector('.cast-va-name');
-                vaEl.style.cursor = 'pointer';
-                vaEl.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    openVoiceActorPortfolioPanel(vaId, vaName);
-                });
-            } else {
-                card.querySelector('.cast-va-name').style.color = 'var(--text-muted)';
-            }
-
-            container.appendChild(card);
+function franchiseWords(anime) {
+    const values = [anime?.title?.english, anime?.title?.romaji, ...(anime?.synonyms || [])]
+        .filter(Boolean)
+        .map(value => String(value).toLowerCase());
+    const stop = new Set(['the','a','an','and','of','to','in','on','season','part','movie','film','ova','ona','special','tv','series','anime']);
+    const words = new Set();
+    for (const value of values) {
+        value.replace(/[^a-z0-9]+/g, ' ').split(/\s+/).forEach(word => {
+            if (word.length >= 4 && !stop.has(word)) words.add(word);
         });
-    } catch (err) {
-        console.error("Cast fetch error:", err);
-        container.innerHTML = '<div class="empty-state">Failed to load cast information.</div>';
+        // Preserve distinctive franchise stems embedded inside compound titles,
+        // e.g. Bakemonogatari / Nisemonogatari.
+        if (value.includes('monogatari')) words.add('monogatari');
     }
+    return words;
 }
 
-// ==========================================
-// 12. FRANCHISE TIMELINE
-// ==========================================
-// Only follow relation types that represent the same continuous story/series,
-// so unrelated franchise hubs (crossovers, spin-offs, character cameos) don't
-// blow up the traversal.
-const CHAIN_RELATION_TYPES = new Set([
-    'Prequel', 'Sequel', 'Parent Story', 'Side Story',
-    'Full Story', 'Summary', 'Alternative Version', 'Alternative Setting'
-]);
-const MAX_FRANCHISE_NODES = 30;
+function isMainFranchiseMatch(rootAnime, candidate) {
+    if (!candidate) return false;
+    const rootWords = franchiseWords(rootAnime);
+    const candidateWords = franchiseWords(candidate);
+    for (const word of rootWords) {
+        if (candidateWords.has(word)) return true;
+        const titles = [candidate?.title?.english, candidate?.title?.romaji, ...(candidate?.synonyms || [])]
+            .filter(Boolean).join(' ').toLowerCase();
+        if (word.length >= 6 && titles.includes(word)) return true;
+    }
+    return false;
+}
 
-async function buildFranchiseTimeline(animeId, currentTitle, currentAiredFrom, currentAiredTo) {
+async function fetchFranchiseTimeline(rootAnime) {
     const container = document.getElementById('chrono-timeline');
-    container.innerHTML = '<div class="spinner"></div>';
-
-    const cacheKey = `chain_${animeId}`;
-    if (franchiseCache[cacheKey]) {
-        renderTimelineLayout(franchiseCache[cacheKey], animeId);
-        return;
-    }
+    // A chronological franchise timeline should represent the main animated
+    // continuity. AniList's CHARACTER, OTHER and SIDE_STORY edges often point to
+    // music videos, promotional shorts, parody clips, or loosely associated media.
+    const MAIN_CONTINUITY_RELATIONS = new Set(['PREQUEL', 'SEQUEL']);
+    const seen = new Map([[rootAnime.id, { ...rootAnime, relation: 'Current' }]]);
+    const queue = [{ anime: rootAnime, depth: 0 }];
 
     try {
-        const nodes = await collectFranchiseChain(parseInt(animeId), currentTitle, currentAiredFrom, currentAiredTo);
-        // Don't permanently cache an apparent standalone — MAL's relation data
-        // for very new/upcoming entries is often filled in after the fact, so
-        // "no relations yet" can be momentarily incomplete rather than truly
-        // standalone. Caching it would lock in the stale result for the rest
-        // of the session even after MAL's data gets corrected.
-        if (nodes.length > 1) {
-            franchiseCache[cacheKey] = nodes;
-        }
-        renderTimelineLayout(nodes, animeId);
-    } catch (err) {
-        console.error("Timeline error:", err);
-        container.innerHTML = '<div class="empty-state">Could not load franchise timeline.</div>';
-    }
-}
-
-// Jikan's free tier hard-caps at 3 req/sec. Sequential traversal sits close to
-// that ceiling, so on a 429 we back off and retry rather than silently giving
-// up and truncating the chain.
-async function fetchJikanWithRetry(url, maxRetries = 3) {
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-            const res = await fetch(url);
-            if (res.status === 429) {
-                await delay(900 * (attempt + 1));
-                continue;
-            }
-            return res;
-        } catch {
-            if (attempt === maxRetries) return null;
-            await delay(900 * (attempt + 1));
-        }
-    }
-    return null;
-}
-
-// Breadth-first walk of the relations graph, following only same-series relation types,
-// until no new connected titles are found (capped to avoid runaway API usage on huge franchises).
-async function collectFranchiseChain(rootId, rootTitle, rootAiredFrom, rootAiredTo) {
-    const visited = new Map();
-    visited.set(rootId, { mal_id: rootId, title: rootTitle, airedFrom: rootAiredFrom || null, airedTo: rootAiredTo || null, status: null, dateKnown: true });
-
-    const queue = [rootId];
-    const fetchedRelationsFor = new Set();
-
-    while (queue.length > 0 && visited.size < MAX_FRANCHISE_NODES) {
-        const currentId = queue.shift();
-        if (fetchedRelationsFor.has(currentId)) continue;
-        fetchedRelationsFor.add(currentId);
-
-        await delay(400);
-        const res = await fetchJikanWithRetry(`https://api.jikan.moe/v4/anime/${currentId}/relations`);
-        if (!res || !res.ok) continue;
-        let relData;
-        try {
-            relData = await res.json();
-        } catch {
-            continue;
-        }
-
-        (relData?.data || []).forEach(rel => {
-            if (!CHAIN_RELATION_TYPES.has(rel.relation)) return;
-            rel.entry.forEach(entry => {
-                if (entry.type !== 'anime') return;
-                if (visited.has(entry.mal_id) || visited.size >= MAX_FRANCHISE_NODES) return;
-                visited.set(entry.mal_id, { mal_id: entry.mal_id, title: entry.name || 'Unknown Title', airedFrom: null, airedTo: null, status: null, dateKnown: false });
-                queue.push(entry.mal_id);
+        while (queue.length && seen.size < 60) {
+            const current = queue.shift();
+            const candidates = (current.anime.relations?.edges || []).filter(edge => {
+                const node = edge.node;
+                return node?.type === 'ANIME'
+                    && MAIN_CONTINUITY_RELATIONS.has(edge.relationType)
+                    && !seen.has(node.id)
+                    && isMainFranchiseMatch(rootAnime, node)
+                    && (adultContentEnabled || !node.isAdult);
             });
-        });
-    }
 
-    // Resolve air dates (start + end) and accurate titles for every node that doesn't already have one
-    const needsDate = [...visited.values()].filter(n => !n.dateKnown);
-    for (const node of needsDate) {
-        await delay(400);
-        const res = await fetchJikanWithRetry(`https://api.jikan.moe/v4/anime/${node.mal_id}`);
-        if (res?.ok) {
-            try {
-                const data = await res.json();
-                node.title = data?.data?.title || node.title;
-                node.airedFrom = data?.data?.aired?.from || null;
-                node.airedTo = data?.data?.aired?.to || null;
-                node.status = data?.data?.status || null;
-            } catch {
-                // leave dates as null — node still renders, just sorted to the end
-            }
+            if (!candidates.length) continue;
+            const ids = [...new Set(candidates.map(edge => edge.node.id))].slice(0, 30);
+            candidates.forEach(edge => seen.set(edge.node.id, {
+                ...edge.node,
+                relation: String(edge.relationType).replaceAll('_', ' '),
+            }));
+
+            if (current.depth >= 8) continue;
+            const query = `query ($ids: [Int]) {
+                Page(page: 1, perPage: 30) {
+                    media(id_in: $ids, type: ANIME) {
+                        id isAdult type format status episodes duration
+                        title { romaji english native }
+                        coverImage { medium large extraLarge }
+                        startDate { year month day }
+                        relations {
+                            edges {
+                                relationType(version: 2)
+                                node {
+                                    id isAdult type format status episodes duration
+                                    title { romaji english native }
+                                    synonyms
+                                    coverImage { medium large extraLarge }
+                                    startDate { year month day }
+                                }
+                            }
+                        }
+                    }
+                }
+            }`;
+            const data = await aniRequest(query, { ids }, {
+                cacheKey: `main-relations:${ids.slice().sort((a, b) => a - b).join(',')}`,
+                ttl: CACHE_TTL.details,
+            });
+            (data.Page?.media || []).forEach(anime => {
+                const existing = seen.get(anime.id) || {};
+                seen.set(anime.id, { ...existing, ...anime, relation: existing.relation || 'Related' });
+                queue.push({ anime, depth: current.depth + 1 });
+            });
         }
+
+        const nodes = [...seen.values()].sort((a, b) => dateNumber(a.startDate) - dateNumber(b.startDate) || a.id - b.id);
+        renderTimelineLayout(nodes, rootAnime.id);
+    } catch (error) {
+        console.error('Timeline error:', error);
+        const partial = [...seen.values()].sort((a, b) => dateNumber(a.startDate) - dateNumber(b.startDate));
+        if (partial.length > 1) renderTimelineLayout(partial, rootAnime.id);
+        else container.innerHTML = '<div class="empty-state">Could not build the franchise timeline.</div>';
     }
-
-    return [...visited.values()];
 }
-
-function formatTimelineDateRange(node) {
-    const fmt = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { year: 'numeric', month: 'short' }) : null;
-    const from = fmt(node.airedFrom);
-    const to = fmt(node.airedTo);
-
-    if (!from) return 'TBA';
-    if (to && to !== from) return `${from} – ${to}`;
-    if (!to && node.status === 'Currently Airing') return `${from} – Present`;
-    return from;
-}
-
 function renderTimelineLayout(nodes, activeId) {
     const container = document.getElementById('chrono-timeline');
-    container.innerHTML = "";
-
-    if (!nodes || nodes.length === 0) {
-        container.innerHTML = '<div class="empty-state">Could not load franchise timeline.</div>';
-        return;
-    }
-
-    const sorted = [...nodes].sort((a, b) => {
-        const aTime = a.airedFrom ? new Date(a.airedFrom).getTime() : Infinity;
-        const bTime = b.airedFrom ? new Date(b.airedFrom).getTime() : Infinity;
-        return aTime - bTime;
-    });
-
-    sorted.forEach(node => {
-        const isCurrent = node.mal_id === parseInt(activeId);
-        const dateLabel = formatTimelineDateRange(node);
-
-        const div = document.createElement('div');
-        div.className = `timeline-node${isCurrent ? ' current-node' : ''}`;
-        div.innerHTML = `
-            <div class="timeline-dot"></div>
-            <div class="timeline-relation">${escapeHtml(dateLabel)}</div>
-            <div class="timeline-title">${escapeHtml(node.title)}</div>
-        `;
-
-        if (!isCurrent) {
-            div.addEventListener('click', () => viewSingleAnime(node.mal_id, true));
-        }
-
-        container.appendChild(div);
+    container.innerHTML = '';
+    if (nodes.length <= 1) { container.innerHTML = '<div class="empty-state">Standalone title — no related anime found.</div>'; return; }
+    nodes.forEach(node => {
+        const current = node.id === Number(activeId);
+        const element = document.createElement('div');
+        element.className = `timeline-node${current ? ' current-node' : ''}`;
+        element.innerHTML = `<div class="timeline-dot"></div><div class="timeline-relation">${escapeHtml(node.relation || 'Related')} · ${escapeHtml(formatDate(node.startDate))}</div><div class="timeline-title">${escapeHtml(displayTitle(node))}</div>`;
+        if (!current) element.addEventListener('click', () => viewSingleAnime(node.id));
+        container.appendChild(element);
     });
 }
 
-// ==========================================
-// 13. VOICE ACTOR MODAL
-// ==========================================
 async function openVoiceActorPortfolioPanel(personId, personName) {
     const modal = document.getElementById('va-modal');
-    const nameHeading = document.getElementById('va-modal-name');
-    const rolesContainer = document.getElementById('va-roles-container');
-
-    nameHeading.textContent = personName;
-    rolesContainer.innerHTML = '<div class="spinner"></div>';
+    const name = document.getElementById('va-modal-name');
+    const roles = document.getElementById('va-roles-container');
     modal.classList.remove('hidden');
-
+    name.textContent = personName;
+    roles.innerHTML = '<div class="spinner"></div>';
     document.getElementById('close-va-modal').onclick = () => modal.classList.add('hidden');
-    modal.onclick = (e) => { if (e.target === modal) modal.classList.add('hidden'); };
-
+    modal.onclick = event => { if (event.target === modal) modal.classList.add('hidden'); };
     try {
-        const res = await fetch(`https://api.jikan.moe/v4/people/${personId}/voices`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const result = await res.json();
-
-        rolesContainer.innerHTML = "";
-        if (!result?.data?.length) {
-            rolesContainer.innerHTML = '<div class="empty-state">No portfolio data found for this voice actor.</div>';
-            return;
-        }
-
-        result.data.slice(0, 15).forEach(role => {
+        const query = `query ($id: Int!) { Staff(id: $id) { id name { full } characters(page: 1, perPage: 25, sort: [FAVOURITES_DESC]) { edges { node { id name { full } } media { id isAdult type popularity title { romaji english native } } } } } }`;
+        const data = await aniRequest(query, { id: Number(personId) }, { cacheKey: `staff:${personId}`, ttl: CACHE_TTL.details });
+        const edges = data.Staff?.characters?.edges || [];
+        roles.innerHTML = '';
+        const visible = edges.filter(edge => edge.media?.length && (adultContentEnabled || edge.media.some(anime => !anime.isAdult)));
+        if (!visible.length) { roles.innerHTML = '<div class="empty-state">No anime roles found.</div>'; return; }
+        visible.forEach(edge => {
+            const anime = [...edge.media].filter(item => adultContentEnabled || !item.isAdult).sort((a, b) => (b.popularity || 0) - (a.popularity || 0))[0];
             const card = document.createElement('div');
             card.className = 'va-role-card';
-            card.innerHTML = `
-                <span class="va-role-anime">${escapeHtml(role.anime?.title || 'Unknown Anime')}</span>
-                <span class="va-role-char">as ${escapeHtml(role.character?.name || 'Unknown Character')}</span>
-            `;
-
-            if (role.anime?.mal_id) {
-                card.addEventListener('click', () => {
-                    modal.classList.add('hidden');
-                    viewSingleAnime(role.anime.mal_id);
-                });
-            }
-
-            rolesContainer.appendChild(card);
+            card.innerHTML = `<span class="va-role-anime">${escapeHtml(displayTitle(anime))}</span><span class="va-role-char">as ${escapeHtml(edge.node.name.full)}</span>`;
+            card.addEventListener('click', () => { modal.classList.add('hidden'); viewSingleAnime(anime.id); });
+            roles.appendChild(card);
         });
-    } catch (err) {
-        console.error("VA modal error:", err);
-        rolesContainer.innerHTML = '<div class="empty-state">Failed to load voice actor data.</div>';
+    } catch (error) {
+        roles.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Failed to load voice roles.')}</div>`;
     }
 }
 
-// ==========================================
-// 14. SURPRISE ME (SHUFFLE)
-// ==========================================
 async function triggerRandomShuffle() {
     showLoading(true);
-    let attempts = 0;
-    const maxAttempts = 4;
-
-    while (attempts < maxAttempts) {
-        try {
-            const response = await fetch('https://api.jikan.moe/v4/random/anime');
-            if (!response.ok) {
-                attempts++;
-                await delay(600);
-                continue;
+    try {
+        // Jikan supplies a true random MAL entry. AniList remains the source for
+        // the detail page by resolving the returned MAL ID to an AniList ID.
+        let selected = null;
+        let lastError = null;
+        for (let attempt = 0; attempt < 5; attempt++) {
+            try {
+                const payload = await jikanRequest('/random/anime', { retries: 0 });
+                const malId = payload?.data?.mal_id;
+                if (!malId) throw new Error('Jikan returned no MAL ID.');
+                const mapped = await getAnimeByMalId(malId);
+                const anime = mapped?.Media;
+                if (!anime?.id) throw new Error('This random MAL title is not available on AniList.');
+                if (!adultContentEnabled && anime.isAdult) continue;
+                selected = anime;
+                break;
+            } catch (error) {
+                lastError = error;
+                await delay(350);
             }
-            const result = await response.json();
-
-            // FIX: Check data exists AND has a valid mal_id
-            if (result?.data?.mal_id) {
-                viewSingleAnime(result.data.mal_id, true);
-                return; // success — exit
-            }
-            attempts++;
-            await delay(600);
-        } catch (err) {
-            console.error("Shuffle attempt failed:", err);
-            attempts++;
-            await delay(600);
         }
-    }
 
-    // All attempts failed
-    showLoading(false);
-    alert("Couldn't pick a random anime right now. The API may be busy — try again in a moment!");
+        if (!selected) {
+            // Reliable fallback: choose from a broad AniList popularity pool.
+            const page = Math.floor(Math.random() * 200) + 1;
+            const query = mediaPageQuery('', `, sort: POPULARITY_DESC${adultArgument()}`);
+            const data = await aniRequest(query, { page, perPage: 25 });
+            const pool = data.Page.media || [];
+            if (!pool.length) throw lastError || new Error('No random title found.');
+            selected = pool[Math.floor(Math.random() * pool.length)];
+        }
+
+        await viewSingleAnime(selected.id);
+    } catch (error) {
+        console.error('Surprise Me failed:', error);
+        alert(error.message || 'Could not select a random anime.');
+    } finally { showLoading(false); }
 }
-
-// ==========================================
-// 15. MY LIST / HISTORY
-// ==========================================
 function appendAnimeToClickHistoryLog(anime) {
-    clickHistory = clickHistory.filter(item => item.mal_id !== anime.mal_id);
-    clickHistory.unshift({
-        mal_id: anime.mal_id,
-        title: anime.title,
-        images: {
-            jpg: {
-                large_image_url: anime.images?.jpg?.large_image_url || anime.images?.jpg?.image_url || '',
-                image_url: anime.images?.jpg?.image_url || ''
-            }
-        }
-    });
-    if (clickHistory.length > 50) clickHistory.pop();
-    localStorage.setItem('chronoClickHistory', JSON.stringify(clickHistory));
+    const compact = compactHistoryItem({ ...anime, viewedAt: Date.now() });
+    clickHistory = clickHistory.filter(item => item.id !== compact.id);
+    clickHistory.unshift(compact);
+    clickHistory = clickHistory.slice(0, HISTORY_LIMIT);
+    persistHistory();
 }
-
 function removeAnimeFromHistoryLog(animeId) {
-    clickHistory = clickHistory.filter(item => item.mal_id !== parseInt(animeId));
-    localStorage.setItem('chronoClickHistory', JSON.stringify(clickHistory));
+    clickHistory = clickHistory.filter(item => item.id !== Number(animeId));
+    persistHistory();
     renderHistoryLogGrid();
 }
 
 function renderHistoryLogGrid() {
     const grid = document.getElementById('click-history-grid');
-    if (!grid) return;
-    grid.innerHTML = "";
-    if (clickHistory.length === 0) {
-        grid.innerHTML = '<div class="empty-state">Your list is empty. Browse anime and they\'ll appear here.</div>';
-        return;
-    }
-    clickHistory.forEach(anime => grid.appendChild(createAnimeCard(anime, true)));
+    const visible = clickHistory.filter(item => adultContentEnabled || !item.isAdult);
+    grid.innerHTML = '';
+    if (!visible.length) { grid.innerHTML = '<div class="empty-state">Your list is empty.</div>'; return; }
+    visible.forEach(item => grid.appendChild(createAnimeCard(item, true)));
 }
-
-document.getElementById('clear-click-history').addEventListener('click', () => {
-    if (confirm("Clear your entire watch history?")) {
-        clickHistory = [];
-        localStorage.setItem('chronoClickHistory', JSON.stringify(clickHistory));
-        renderHistoryLogGrid();
-    }
-});
-
-renderHistoryLogGrid();
-
-/* ==========================================
-   SCHEDULE VIEW
-   ========================================== */
-
-let scheduleInitialized = false;
 
 function initScheduleView() {
-    if (scheduleInitialized) return;
-    scheduleInitialized = true;
-    buildDayNav();
+    if (!scheduleInitialized) {
+        buildDayNav();
+        scheduleInitialized = true;
+    } else {
+        fetchScheduleForDate(new Date());
+    }
 }
-
 function buildDayNav() {
     const nav = document.getElementById('schedule-day-nav');
-    if (!nav) return;
     nav.innerHTML = '';
-
     const today = new Date();
-    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-
-    for (let i = 0; i < 7; i++) {
-        const d = new Date(today);
-        d.setDate(today.getDate() + i);
-
-        const btn = document.createElement('button');
-        btn.className = 'sched-day-btn' + (i === 0 ? ' active' : '');
-        btn.innerHTML = `
-            <span class="sched-day-month">${months[d.getMonth()]} ${d.getDate()}</span>
-            <span class="sched-day-name">${i === 0 ? 'Today' : days[d.getDay()]}</span>
-        `;
-        btn.addEventListener('click', () => {
-            nav.querySelectorAll('.sched-day-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            fetchScheduleForDay(d.getDay());
+    for (let offset = 0; offset < 7; offset++) {
+        const date = new Date(today);
+        date.setDate(today.getDate() + offset);
+        const button = document.createElement('button');
+        button.className = `sched-day-btn${offset === 0 ? ' active' : ''}`;
+        button.innerHTML = `<span class="sched-day-month">${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}</span><span class="sched-day-name">${offset === 0 ? 'Today' : date.toLocaleDateString([], { weekday: 'short' })}</span>`;
+        button.addEventListener('click', () => {
+            nav.querySelectorAll('.sched-day-btn').forEach(item => item.classList.remove('active'));
+            button.classList.add('active');
+            fetchScheduleForDate(date);
         });
-        nav.appendChild(btn);
+        nav.appendChild(button);
     }
-
-    fetchScheduleForDay(today.getDay());
+    fetchScheduleForDate(today);
 }
-
-async function fetchScheduleForDay(dayOfWeek) {
+async function fetchScheduleForDate(date) {
     const list = document.getElementById('schedule-list');
-    if (!list) return;
-
-    list.innerHTML = `<div class="schedule-loading"><div class="sched-spinner"></div><span>Fetching schedule...</span></div>`;
-
-    const dayNames = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-    const dayParam = dayNames[dayOfWeek];
-
-    try {
-        // Fetch up to 3 pages to get a full day's schedule
-        let allItems = [];
-        for (let page = 1; page <= 3; page++) {
-            const res = await fetch(`https://api.jikan.moe/v4/schedules?filter=${dayParam}&limit=25&page=${page}`);
-            const json = await res.json();
-            const items = json.data || [];
-            allItems = allItems.concat(items);
-            if (!json.pagination?.has_next_page) break;
+    list.innerHTML = '<div class="schedule-loading"><div class="sched-spinner"></div><span>Fetching schedule...</span></div>';
+    const start = new Date(date); start.setHours(0, 0, 0, 0);
+    const end = new Date(date); end.setHours(23, 59, 59, 999);
+    const query = `query ($start: Int!, $end: Int!, $page: Int!, $perPage: Int!) {
+        Page(page: $page, perPage: $perPage) {
+            pageInfo { hasNextPage }
+            airingSchedules(airingAt_greater: $start, airingAt_lesser: $end, sort: TIME) {
+                id airingAt episode
+                media { ${MEDIA_CARD_FIELDS} }
+            }
         }
-
-        // Filter TV only and deduplicate by mal_id
-        const seen = new Set();
-        const unique = allItems.filter(a => {
-            if (seen.has(a.mal_id)) return false;
-            seen.add(a.mal_id);
-            return true;
-        });
-
-        renderScheduleList(unique, dayOfWeek);
-    } catch(e) {
-        list.innerHTML = `<div class="schedule-empty"><span>Could not load schedule. Please try again.</span></div>`;
+    }`;
+    try {
+        const all = [];
+        for (let page = 1; page <= 5; page++) {
+            const variables = { start: Math.floor(start.getTime() / 1000), end: Math.floor(end.getTime() / 1000), page, perPage: 50 };
+            const data = await aniRequest(query, variables, { cacheKey: `schedule:${adultContentEnabled}:${start.toISOString().slice(0,10)}:${page}`, ttl: CACHE_TTL.schedule });
+            all.push(...(data.Page.airingSchedules || []));
+            if (!data.Page.pageInfo.hasNextPage) break;
+        }
+        renderScheduleList(all.filter(item => adultContentEnabled || !item.media.isAdult));
+    } catch (error) {
+        list.innerHTML = `<div class="schedule-empty"><span>${escapeHtml(error.message || 'Could not load schedule.')}</span></div>`;
     }
 }
-
-// Convert JST "HH:MM" to user's local time string
-function jstToLocal(jstTime) {
-    if (!jstTime) return null;
-    const [h, m] = jstTime.split(':').map(Number);
-    // JST = UTC+9
-    const utcMs = Date.UTC(2000, 0, 1, h - 9, m);
-    const local = new Date(utcMs);
-    return local.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
-}
-
-function renderScheduleList(items, dayOfWeek) {
+function renderScheduleList(items) {
     const list = document.getElementById('schedule-list');
-    if (!list) return;
-
-    if (!items || items.length === 0) {
-        list.innerHTML = `<div class="schedule-empty"><span>No episodes scheduled for this day.</span></div>`;
-        return;
-    }
-
-    // Sort by broadcast JST time
-    items.sort((a, b) => {
-        const ta = a.broadcast?.time || '99:99';
-        const tb = b.broadcast?.time || '99:99';
-        return ta.localeCompare(tb);
-    });
-
-    // Get user's timezone abbreviation
-    const tzAbbr = new Intl.DateTimeFormat('en', { timeZoneName: 'short' })
-        .formatToParts(new Date())
-        .find(p => p.type === 'timeZoneName')?.value || 'Local';
-
     list.innerHTML = '';
-    items.forEach(anime => {
+    if (!items.length) { list.innerHTML = '<div class="schedule-empty"><span>No episodes scheduled.</span></div>'; return; }
+    items.sort((a, b) => a.airingAt - b.airingAt).forEach(entry => {
+        const anime = entry.media;
+        const time = new Date(entry.airingAt * 1000);
         const item = document.createElement('div');
         item.className = 'schedule-item';
-
-        const rawTime = anime.broadcast?.time;
-        const localTime = jstToLocal(rawTime);
-        let timeHTML = '';
-        if (localTime) {
-            timeHTML = `<div class="sched-time"><span class="sched-time-val">${localTime}</span><span class="sched-time-tz">${tzAbbr}</span></div>`;
-        } else {
-            timeHTML = `<div class="sched-time sched-time--tba"><span class="sched-time-val">TBA</span></div>`;
-        }
-
-        const ep = anime.episodes ? `${anime.episodes} eps` : 'Ongoing';
-        const score = anime.score ? anime.score.toFixed(1) : null;
-        const genres = (anime.genres || []).slice(0, 2).map(g => g.name).join(' · ');
-
-        item.innerHTML = `
-            ${timeHTML}
-            <img class="sched-poster" src="${anime.images?.jpg?.image_url || ''}" alt="${anime.title}" loading="lazy">
-            <div class="sched-info">
-                <div class="sched-anime-title">${anime.title}</div>
-                <div class="sched-meta">
-                    <span class="sched-ep">${ep}</span>
-                    ${genres ? `<span class="sched-genres">${genres}</span>` : ''}
-                    <span class="sched-badge airing">Airing</span>
-                </div>
-            </div>
-            ${score ? `<div class="sched-score"><svg width="11" height="11" viewBox="0 0 24 24" fill="#f5c518"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>${score}</div>` : ''}
-        `;
-
-        item.style.cursor = 'pointer';
-        item.addEventListener('click', () => viewSingleAnime(anime.mal_id));
-
+        item.innerHTML = `<div class="sched-time"><span class="sched-time-val">${time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span><span class="sched-time-tz">${Intl.DateTimeFormat().resolvedOptions().timeZone}</span></div><img class="sched-poster" src="${escapeHtml(imageUrl(anime))}" alt="${escapeHtml(displayTitle(anime))}" loading="lazy"><div class="sched-info"><div class="sched-anime-title">${escapeHtml(displayTitle(anime))}</div><div class="sched-meta"><span class="sched-ep">Episode ${entry.episode}</span>${anime.genres?.length ? `<span class="sched-genres">${escapeHtml(anime.genres.slice(0,2).join(' · '))}</span>` : ''}<span class="sched-badge airing">Airing</span></div></div>${anime.averageScore ? `<div class="sched-score">★ ${(anime.averageScore / 10).toFixed(1)}</div>` : ''}`;
+        item.addEventListener('click', () => viewSingleAnime(anime.id));
         list.appendChild(item);
     });
 }
+
+function initApp() {
+    initNavigation();
+    initPreferences();
+    initSearchEngine();
+    initSliders();
+    initDiscoverFilters();
+    initGlobalFilterListeners();
+    initImageLazyLoad();
+    initHeroControls();
+    initCastLanguageToggle();
+    persistHistory();
+    document.getElementById('clear-click-history')?.addEventListener('click', () => {
+        if (confirm('Clear your watch history?')) {
+            clickHistory = [];
+            persistHistory();
+            renderHistoryLogGrid();
+        }
+    });
+    window.addEventListener('popstate', handleBrowserBackNavigation);
+    window.addEventListener('scroll', () => mainNav?.classList.toggle('scrolled', window.scrollY > 20));
+    loadDashboardRows();
+    if (history.state?.view) handleBrowserBackNavigation({ state: history.state });
+    else history.replaceState({ view: 'view-home' }, '', '');
+}
+
+document.addEventListener('DOMContentLoaded', initApp);
