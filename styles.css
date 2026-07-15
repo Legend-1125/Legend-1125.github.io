@@ -6,8 +6,8 @@
     --bg-navbar: rgba(15, 15, 15, 0.92);
     --bg-elevated: #1a1a1a;
     --bg-card: #1e1e1e;
-    --accent-red: #E50914;
-    --accent-red-hover: #C1141F;
+    --accent-red: #8B5CF6;
+    --accent-red-hover: #7C3AED;
     --accent-cyan: #06B6D4;
     --text-white: #FFFFFF;
     --text-muted: #888888;
@@ -1631,7 +1631,7 @@ body {
 .adult-toggle { display:inline-flex; align-items:center; cursor:pointer; user-select:none; }
 .adult-toggle input { position:absolute; opacity:0; pointer-events:none; }
 .adult-toggle span { padding:5px 9px; border:1px solid var(--glass-border); border-radius:16px; font-size:11px; font-weight:800; color:var(--text-muted); background:rgba(255,255,255,.05); transition:.2s; }
-.adult-toggle input:checked + span { color:#fff; background:var(--accent-red); border-color:var(--accent-red); box-shadow:0 0 14px rgba(229,9,20,.25); }
+.adult-toggle input:checked + span { color:#fff; background:var(--accent-red); border-color:var(--accent-red); box-shadow:0 0 14px color-mix(in srgb, var(--accent-red) 35%, transparent); }
 .filter-reset-btn, .inline-retry-btn {
     border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.07); color:#fff;
     border-radius:20px; padding:6px 13px; font-size:12px; font-weight:700; cursor:pointer;
@@ -1665,7 +1665,11 @@ body {
 .cast-language-toggle button { border:0; background:transparent; color:var(--text-muted); border-radius:14px; padding:5px 10px; font-size:10px; font-weight:800; cursor:pointer; }
 .cast-language-toggle button.active { background:var(--accent-cyan); color:#071014; }
 .detail-adult-warning { display:inline-flex; align-items:center; margin:0 0 14px; padding:6px 10px; border:1px solid rgba(229,9,20,.5); border-radius:5px; background:rgba(229,9,20,.12); color:#ff7b82; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.5px; }
-#discover-adult-filter { border-color:rgba(229,9,20,.38); }
+#discover-adult-filter, #grid-discover-adult { border-color: color-mix(in srgb, var(--accent-red) 72%, transparent); background-color: color-mix(in srgb, var(--accent-red) 14%, transparent); }
+.adult-filter-active .az-select-trigger { border-color: color-mix(in srgb, var(--accent-red) 72%, transparent); background: color-mix(in srgb, var(--accent-red) 14%, var(--bg-elevated)); color: #fff; box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-red) 15%, transparent); }
+.adult-filter-active .az-select-trigger::after { color: var(--accent-red); }
+.adult-filter-active.open .az-select-trigger { border-color: var(--accent-red); background: color-mix(in srgb, var(--accent-red) 22%, var(--bg-elevated)); }
+.adult-filter-active .az-select-option:hover, .adult-filter-active .az-select-option.selected { background: color-mix(in srgb, var(--accent-red) 16%, transparent); color: var(--accent-red); }
 
 
 /* Language toggles and Netflix-style hero crossfade */
@@ -1979,11 +1983,46 @@ body {
 .favorite-action-row #local-favorite-btn { min-width:132px; }
 @media (max-width:720px) { .theme-menu-panel { position:fixed; top:68px; right:4%; width:min(250px,92vw); } }
 
-/* Minimal clickable search action */
-.search-wrapper.open .search-input-container { padding-right: 58px; }
-.search-submit-btn { position:absolute; right:7px; width:26px; height:26px; border:0; border-radius:5px; background:rgba(255,255,255,.1); color:var(--text-white); display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .2s, transform .2s; }
-.search-submit-btn:hover { background:rgba(255,255,255,.18); transform:scale(1.04); }
-.search-wrapper:not(.open) .search-submit-btn { display:none; }
-#clear-search-btn { right:38px; }
+/* Search uses the outer icon only. */
+.search-wrapper.open .search-input-container { padding-right: 34px; }
+#clear-search-btn { right:8px; }
 .theme-avatar-button { border-radius:8px; }
 .theme-avatar-button img { border-radius:7px; }
+
+
+/* Profile settings */
+:root[data-theme="crimson"] { --accent-red:#E50914; --accent-red-hover:#C1141F; --accent-cyan:#ff6670; --bg-black:#10090a; --bg-elevated:#211214; --bg-card:#291619; }
+.theme-menu-panel { width:300px; max-height:min(78vh,620px); overflow-y:auto; }
+.settings-section { padding:10px 4px; border-top:1px solid rgba(255,255,255,.08); }
+.settings-section:first-of-type { border-top:0; padding-top:0; }
+.settings-label { margin:0 2px 8px; font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:var(--text-muted); }
+.watch-site-options { display:flex; flex-direction:column; gap:7px; }
+.watch-site-row { display:grid; grid-template-columns:20px 1fr auto; align-items:center; gap:8px; padding:8px; border:1px solid rgba(255,255,255,.09); border-radius:9px; background:rgba(255,255,255,.035); }
+.watch-site-row input[type="radio"] { accent-color:var(--accent-red); }
+.watch-site-name { min-width:0; font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.watch-site-remove { border:0; background:transparent; color:var(--text-muted); cursor:pointer; font-size:16px; line-height:1; padding:2px 4px; }
+.watch-site-remove:hover { color:#fff; }
+.settings-add-btn { width:100%; margin-top:8px; padding:9px; border:1px dashed rgba(255,255,255,.22); border-radius:9px; background:rgba(255,255,255,.04); color:#fff; cursor:pointer; font-weight:700; }
+.settings-add-btn:hover { background:rgba(255,255,255,.08); border-color:var(--accent-red); }
+.settings-add-btn:disabled { opacity:.45; cursor:not-allowed; }
+.settings-hint { margin-top:8px; color:var(--text-muted); font-size:10px; line-height:1.45; }
+.settings-hint code { color:var(--accent-cyan); }
+
+/* Profile content preference */
+.profile-adult-toggle {
+    width: 100%;
+    justify-content: space-between;
+    padding: 10px 12px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-sm);
+    background: rgba(255,255,255,0.04);
+}
+.profile-adult-toggle span {
+    font-size: 13px;
+    font-weight: 650;
+    color: var(--text-white);
+}
+.profile-adult-toggle:has(input:checked) {
+    border-color: var(--theme-accent, var(--accent-red));
+    background: color-mix(in srgb, var(--theme-accent, var(--accent-red)) 14%, transparent);
+}

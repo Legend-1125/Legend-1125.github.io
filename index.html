@@ -56,19 +56,33 @@
 <button class="hidden" id="clear-search-btn" type="button" aria-label="Clear search">
 <svg fill="none" height="14" stroke="currentColor" stroke-linecap="round" stroke-width="2.5" viewbox="0 0 24 24" width="14"><line x1="18" x2="6" y1="6" y2="18"></line><line x1="6" x2="18" y1="6" y2="18"></line></svg>
 </button>
-<button class="search-submit-btn" id="search-submit-btn" type="button" aria-label="Search">
-<svg fill="none" height="14" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" viewbox="0 0 24 24" width="14"><circle cx="11" cy="11" r="7"></circle><line x1="20" x2="16.2" y1="20" y2="16.2"></line></svg>
-</button>
 </div>
 <div class="dropdown-panel hidden" id="search-suggestions"></div>
 </div>
-<div class="api-preferences"><label class="adult-toggle" title="Show adult anime"><input id="adult-content-toggle" type="checkbox"/><span>18+</span></label><select aria-label="Title language" class="nav-select" id="title-language-select"><option value="english">English</option><option value="romaji">Romaji</option></select></div><div class="theme-menu-wrap" id="theme-menu-wrap">
+<div class="api-preferences"><select aria-label="Title language" class="nav-select" id="title-language-select"><option value="english">English</option><option value="romaji">Romaji</option></select></div><div class="theme-menu-wrap" id="theme-menu-wrap">
 <button class="theme-avatar-button" id="theme-menu-btn" type="button" aria-label="Choose anime theme" aria-expanded="false">
 <img alt="Current theme" id="theme-avatar-image"/>
 </button>
 <div class="theme-menu-panel hidden" id="theme-menu-panel" role="menu">
-<div class="theme-menu-title">Anime Themes</div>
+<div class="theme-menu-title">Profile Settings</div>
+<div class="settings-section">
+<div class="settings-label">Color theme</div>
 <div id="theme-options" class="theme-options theme-options-menu"></div>
+</div>
+<div class="settings-section adult-settings">
+<div class="settings-label">Content settings</div>
+<label class="adult-toggle profile-adult-toggle" title="Show adult anime">
+<input id="adult-content-toggle" type="checkbox"/>
+<span>Enable 18+ content</span>
+</label>
+<div class="settings-hint">Off by default. Your choice is saved on this device.</div>
+</div>
+<div class="settings-section website-settings">
+<div class="settings-label">Watch website</div>
+<div id="watch-site-options" class="watch-site-options"></div>
+<button class="settings-add-btn" id="add-watch-site-btn" type="button">+ Save website</button>
+<div class="settings-hint">The default link opens the setup documentation. You can save up to 3 HTTPS websites and use <code>{query}</code> to insert the anime title.</div>
+</div>
 </div>
 </div>
 </div>

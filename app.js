@@ -744,7 +744,12 @@ function updateVisibleTitlesForLanguage() {
 function initSearchEngine() {
     const trigger = document.getElementById('search-icon-trigger');
     const wrapper = trigger?.parentElement;
-    trigger?.addEventListener('click', () => {
+    const collapseSearch = () => {
+        wrapper?.classList.remove('open');
+        suggestionsDropdown?.classList.add('hidden');
+    };
+    trigger?.addEventListener('click', event => {
+        event.stopPropagation();
         wrapper?.classList.toggle('open');
         if (wrapper?.classList.contains('open')) searchInput?.focus();
     });
@@ -762,7 +767,10 @@ function initSearchEngine() {
         suggestionController?.abort();
         suggestionsDropdown?.classList.add('hidden');
         const query = searchInput.value.trim();
-        if (query) executeGlobalSearch(query, 1);
+        if (query) {
+            executeGlobalSearch(query, 1);
+            collapseSearch();
+        }
     });
     clearSearchBtn?.addEventListener('click', () => {
         searchInput.value = '';
@@ -771,8 +779,11 @@ function initSearchEngine() {
         searchInput.focus();
     });
     document.addEventListener('click', event => {
-        if (!wrapper?.contains(event.target)) suggestionsDropdown?.classList.add('hidden');
+        if (!wrapper?.contains(event.target)) collapseSearch();
     });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') collapseSearch(); });
+    document.querySelectorAll('.nav-btn, #logo-btn, #shuffle-btn').forEach(control => control.addEventListener('click', collapseSearch));
+    window.addEventListener('scroll', () => { if (wrapper?.classList.contains('open') && document.activeElement !== searchInput) collapseSearch(); }, { passive: true });
 }
 async function fetchSearchSuggestions(queryText) {
     suggestionController?.abort();
@@ -947,7 +958,10 @@ function renderHeroSlide(index) {
         document.querySelector('.hero-badge.top-10').textContent = `#${index + 1} Trending`;
         document.querySelector('.hero-badge.new-season').textContent = anime.seasonYear ? `${anime.season || ''} ${anime.seasonYear}`.trim() : formatStatus(anime.status);
         const watchTitle = anime.title?.english || anime.title?.romaji || '';
-        document.getElementById('hero-watch-btn').onclick = () => window.open(`https://anikototv.to/filter?keyword=${encodeURIComponent(watchTitle)}`, '_blank', 'noopener,noreferrer');
+        const selectedWatchSite = getSelectedWatchSite();
+        const heroWatchButton = document.getElementById('hero-watch-btn');
+        heroWatchButton.textContent = `Watch on ${selectedWatchSite.name}`;
+        heroWatchButton.onclick = () => window.open(buildWatchUrl(selectedWatchSite.url, watchTitle), '_blank', 'noopener,noreferrer');
         document.getElementById('hero-info-btn').onclick = () => viewSingleAnime(anime.id);
         document.querySelectorAll('#hero-indicators .hero-dot').forEach((dot, i) => dot.classList.toggle('active', i === index));
     };
@@ -1014,7 +1028,9 @@ function syncDiscoverAdultFilter() {
         select.disabled = !adultContentEnabled;
         select.value = selectedDiscoverAdult;
         select.classList.toggle('hidden', !adultContentEnabled);
-        select.closest('.az-select')?.classList.toggle('hidden', !adultContentEnabled);
+        const wrapper = select.closest('.az-select');
+        wrapper?.classList.toggle('hidden', !adultContentEnabled);
+        wrapper?.classList.toggle('adult-filter-active', adultContentEnabled);
         select._azRebuild?.();
     });
 }
@@ -1320,11 +1336,13 @@ function renderStudioLinks(studios) {
 }
 function buildStreamingLinks(anime) {
     const title = anime.title?.english || anime.title?.romaji || '';
+    const selectedSite = getSelectedWatchSite();
+    const watchUrl = buildWatchUrl(selectedSite.url, title);
     const malLink = anime.idMal
         ? `<a class="watch-now-btn watch-myanimelist" href="https://myanimelist.net/anime/${Number(anime.idMal)}" target="_blank" rel="noopener noreferrer">ⓘ MyAnimeList</a>`
         : '';
     document.getElementById('streaming-links-container').innerHTML = `
-        <a class="watch-now-btn watch-custom" href="https://anikototv.to/filter?keyword=${encodeURIComponent(title)}" target="_blank" rel="noopener noreferrer">▶ Watch on Anikoto</a>
+        <a class="watch-now-btn watch-custom" href="${escapeHtml(watchUrl)}" target="_blank" rel="noopener noreferrer">▶ Watch on ${escapeHtml(selectedSite.name)}</a>
         <a class="watch-now-btn watch-anilist" href="${escapeHtml(anime.siteUrl || `https://anilist.co/anime/${anime.id}`)}" target="_blank" rel="noopener noreferrer">ⓘ AniList</a>
         ${malLink}`;
 }
@@ -1743,26 +1761,71 @@ function siteConfirm(message, options = {}) {
 
 // Local visual themes do not require MAL or AniList login.
 const THEME_AVATAR_DATA = Object.freeze({
-    default: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAFcklEQVR42u3dTWviUBSA4ShdxLoIiN0I/v8fJnYjCC6U7OyiyHwgMxMnmnvueZ7dMGUYkntfz9U2ne0X62sDkNDcJQAEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAgfTeXIIflsdd07Xt3b/7fP9wgaje5nJItf5n+8X66oYPI4bYA3XsgbQBfOSmCyEZTjuZ9kC6AI5144WQzC/+taz/ebYbP3b8nrGgIEr8bv/m8rgTwGw3XgSxB751bRsygnM3XgSxB7JG0PcBiiDW5KgRFEBBgiJMMZFF2nNVB3CqGyG6lGKqiSzKUdgROPkCwACQ+ShcbQCnDlC090Igo2oDKECQdwJ1BAbxQQAtQkAAAeoPoMkLMAECCCBAkgB6Ph9gAgQQQJMoIIDgxZf6A2gBgD1oAnTzSerU9y5C5gBaAGR2Xm0NAJkDONUCMP1hCDABOopCwiEg0p5L8R7gK18FBZfMQ0C09Z8igOfV9iURFD8yRzDicTvNp8DPjqD4kTmCp76f9EOXR832i/U120IY+3FZ4of1H1PKAI61CISPzHsg6tQngD9ZHneDf4GS8JE5hDWETwAHLAbBwx6ocw8IIJCWnwUGBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQSYyptLAPyvzeXwy58/3z9C/L9n+8X66vYBQy2Pu6Zr2z9+TekhdAQGBodvczn8NX73JkMBBKoPX5QIeg+Qh9xb1FHe92H8o25U3gNk9FdzIcxzr4cocV2YABl9Q9y+TgiFr3QCyNM2xeZyaE5935xXWxdQ+ASQfLq2bTohFD0BJPMmuYXQ0Vj4BBCbTwhTRa/Uey2ATL4hHY9NegJIWo7HdUev5Hvq+wApdlOJYexJL8JkbwIkxKZ2TI51tPU0GGw6GyxN8KLeFxMgg440pfxM6O9BqG1CjPbhRdQXJBMgVW/O0jdm9E9po0/iAshDanhCyCs2b43fhlLTtC2A2OCkmPYEECFE+AQQISTLMVcAebmanyJs2hNAMBWa9gQQhNC0J4AghqIngPDvvFcoegIIYjgaD44QQByTTXkIIIIoeAggguhIiwAiiiY7BJBESvqAxUQngFDNJGlqE0CAcOYuASCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCAggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIICKBLAAgggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAICCCCAAAIIkMAXVHSdYTxR8wgAAAAASUVORK5CYII=',
-    sakura: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAFi0lEQVR42u3dsW7aUBiGYYMyePMNwpiRkZsgY0ZGrtAbm7u0aislkUwc7P98z7NVlSrFPuflPybQ3XS4TB1AoL1LAAgggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAICCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAAC8V5cgr/G66kb+v7jvzy+uUC073aOWv+76XCZ3PCZxBB7QADjbroQknDaCdoDcQFc7MYLIckv/o2s/33ajV88fj+xoKBK/H7/m+P1JIBxN14EsQe6ruu6oe9LRnDvxosg9kBqBP0eoAhiTS4aQQEUJNiEVSayQnuu7QCudSNEl41YayKrchR2BA5fABgAko/CzQZw7QBVexYCiZoNoABB7gTqCAzigwBahIAAAgQE0OQFmAABBBAgJIC+nw8wAQIIoEkUEEDw4kv7AbQAwB40Abr5ZBrvdxchOYAWAMmG13cDQHIAV1sApj8MAQLoKAqBQ0ChPRfxDPCpr4KCS/IQUGz9RwRweH1/TgTFj+AIVjxux7wL/OMRFD+CIzje7+u+6fKg3XS4THELYemvyxI/rP+SMgO41CIQPoL3QNWpTwD/vYnX0/z/QEn4CA5hC+ETwDmLQfCwB5r8UQUQiOWzwIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCAggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAGt5cQmAb7ud///z8U0AgXaN11M39P3XQdx4CB2Bgdnh627nz+P31WQogEDz4SsSQUdgHvPRoi7y3IfHjrpDgz/bbjpcJreYRV/NhTDnXs+xwXVhAmT5DVHkATj1jqwCSJ1NcTt34/3eDa/vrp/wCSB5hr4XQtETQLI3yZ8QOhoLnwBi8wlhVvQ2eq8FkNU3pOOxSU8AieV43Hj0NnxP/R4g291UYlh60qsw2ZsAKbGpHZOLHW2PbyU+OWICpOamS5sOqzzLK3ZfTIDMO9LM/SD8k4LQ3IRY7c2Loi9IJkDa3pxb35jV36UtPokLII9Ng199GabN207gPjsJNDJtCyA2OBHT3kc8A2SZTSGEwieACKEQOuY6ApO+gVp4RmjaE0D4NlOhaU8AEUIhNO1ti2eArLPhxFD0BJD0jehZoeg5AoMYLncdfXGEANIAx2RTniMwNrUgCp4AYtNHBtGR1hEYMo7NJjsTICwdkC29wWKiMwFCO5Okqc0ECAmTJG3ZuwSAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgggIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAgAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIICCALgEggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIICCCAAAIIIECAX/EOWdBfmuKNAAAAAElFTkSuQmCC',
-    shonen: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAFd0lEQVR42u3dMXLaQBSA4YVxoU5HgJIzQcm5KLkTJVdQp05u7EkywyQRFmjfvu/rMvFkEmn3562wyWY67qYCkNDWJQAEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAgfQ+XIJfhsut9F33+DdPexeI9l3vqdb/ZjruJjd8JjHEHhDAdDddCMlw2km0B9IFcLEbL4RkfvFvZP1vs934xeP3igUFUeL39WcOl5sAprvxIog9UEoppe+6kBHcuvEiiD2QNYK+D1AEsSYXjaAAChJUYZWJLNCeazuAa90I0aUSa01kUY7CjsDJFwAGgMxH4WYDuHaAoj0LgYyaDaAAQd4J1BEYxAcBtAgBAQRIEECTF2ACBBBAgCQB9Pl8gAkQQABNooAAghdf2g+gBQD2oAnQzSenYRxdhMwBtADIrD8fDACZA7jaAjD9YQgQQEdRSDgEBNpzKZ4BvvVVUHDJPAQEW/8pAtifD++JoPiROIIRj9tp3gV+eQTFj8QRHMZx3TddnrSZjrsp3UJY+uOyxA/rP6ScAVxqEQgfifdA1KlPAH+/iZfb/P9ASfhIHMIWwieAcxaD4GEPNPlPFUAgLT8LDAgggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAICCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIsJYPlwD4sev9z1+f9iH+2pvpuJvcPWCu4XIrfdf9/YsqD6EjMDA7fOV6/3f8Hk2GAgg0H74gEfQMkOc8WtRBnvvw3FG3b/Df5hkgy7+aC2Geez1HhevCBMjyG+L764RQ+CongLxuU1zvZRjH0p8Prp/wCSD59F0nhKIngOTeJN8hdDQWPgHE5hPCXNGr9F4LIKtvSMdjk54AkpbjcePRq/ie+j5A6t1UYhh60osw2ZsACbGpHZODHW1P+xA/OWICJOamyzYdRnmWF+y+mACZd6SZ+4PwbwpCcxNitDcvgr4gmQBpe3PWvjGjv0sbfBIXQJ6bBv/nwzBt3ia/DaWlaVsAscFJMe0JIEKI8AkgQkiWY64A8v4N1MIzQtOeAIKp0LQngCCEpj0BBDEUPQGEnx+/PCsUPQEEMVzsOvrgCAHEMdmUhwAiiIKHACKIjrQIIKJoskMAyaOmN1hMdAII7UySpjYBBIhm6xIAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAgAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggIAAugSAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgggIIAAAggggAAJfAKZUGayp+4zPwAAAABJRU5ErkJggg==',
-    cyber: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAFlElEQVR42u3dMW7iQBSAYYMi4o6OC1ByCkouTEouQUouQEdnKlJE0bIRQWt2gv3mfV+3WmkLe+bnjUm8k9l2f2kAEpq6BIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCAggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIICAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgggkN6LS/DHcb1s5m178+9e395dIKp33qxSrf/JbLu/uOH9iCH2QB17IG0AH7npQkiG006mPZAugKVuvBCS+cO/lvU/zXbjS8fvNxYURInf1795XC8FMNuNF0HsgU/ztg0ZwakbL4LYA1kj6OcARRBrsmgEBVCQYBSGmMgi7bmqAzjUjRBdxmKoiSzKUdgROPkCwACQ+ShcbQCHDlC0ZyGQUbUBFCDIO4E6AoP4IIAWISCAAPUH0OQFmAABBBAgSQC9nw8wAQIIoEkUEEDw4Uv9AbQAwB40Abr5JHXqOhchcwAtADJb7A4GgMwBHGoBmP4wBJgAHUUh4RAQac+leAb4zE9BwSXzEBBt/acI4GJ3eEoExY/MEYx43E7zLfBvR1D8yBzBU9cN+qXLoyaz7f6SbSGUfl2W+GH9x5QygKUWgfCReQ9EnfoE8Mpxvez9HygJH5lDWEP4BLDHYhA87IE694AAAmn5XWBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQIChvLgEwP86b1Z//fn17V0AgXod18tm3rZ3gzj2EDoCA73Dd96sfozfvclQAIHqwxclgo7APOTWoo7y3IdyR93oJrPt/uIWU/LTXAjz3Os+xrguTIAU3xBRHoAT78gqgITZFOfNqjl1XbPYHVxA4RNA8pm3rRCKngCSe5N8hdDRWPgEEJtPCFNFb6z3WgAZfEM6Hpv0BJC0HI/rjt6Y76mfA2S0m0oMY096ESZ7EyAhNrVjcqyjbZQPLxMgITddtukwyrO8aPfFBEivI81Yfif0exBqmxCjfXkR9QPJBEjVm3PsGzP6t7TRJ3EB5CE1vCHkGZu3xh9DqWnaFkBscFJMe7d4BkiRTSGEwieACKEQOuYKINlDWPNbhE17Agh3XU8PpkLTngDieCyEpj0BxIYTQ9ETQGxEzwpFTwDJ6/rZkxiW4cURAkjwGDomm/IEEJtaEAVPACFvEB1pBRD+aQrydhUEEFH8ZkxfsJjoBBCeqm9w+kySpjYBhBSTJHWZugSAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgggIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAgAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIICCALgEggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIICCCAAAIIIEACH4JWlGJuCfqGAAAAAElFTkSuQmCC',
-    ghibli: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAFaklEQVR42u3du24aURCA4QW52I43wRIukXgwJFxQ8GBIlBQ8Ct12pIisJFZuixd2Z+b7uihWFO2e8zOHm2fL3erWABQ0dwkAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQKC8F5fgh+P21Cza9rd/9/r+5gKR3mV/LrX+Z8vd6uaG9yOG2AM59kDZAN5z04WQCqedSnugXACHuvFCSOUH/yzrv1QAh77xIog98N2165rNYR3ueszd+Bj/Pkx5jS7atjluTwJYMX4iiD0QM4LeByiCWJODRlAABQkmYYyJLNKeSx3AsW6E6DIVY01kUY7CjsDFFwAGgMpH4bQBHDtA0Z4LgYrSBlCAoO4E6ggM4oMAWoSAAALkD6DJCzABAgggQJEA+moqwAQIIIAmUUAAwYMv+QNoAYA9aAJ08ynq2nUuQuUAWgBUNuYvKYoyAMwtANMfhgAToKMoGAKK7bkSzwE+81FQcKk8BERb/yUCuDmsnxJB8aNyBCMet8u8CvzoCIoflSN47bpRX3S512y5W92qLYShvy5L/LD+YyoZwKEWgfBReQ9EnfoE8CfH7an3L1ASPiqHMEP4BLDHYhA87IGce0AAgbJ8FhgQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEGAsLy4B8FWX/fmXP7++v4X4f8+Wu9XN7QP6Om5PzaJt//ozUw+hAAKDhy9KBAUQeEj4IkTQc4Dc5fNzPhGOOzw/fFNnAuTL4RPCuvc6+hRoAmTwDfHxc0IofFMngDxsU1z25+badc3msHYBhU8AqWfRtkIoegJI7U3yEUJHY+ETQGw+ISwVPW+DgT9sSMdjk54AUpbjce7o+SQINlWyjeP+/FuEyd4ESIhN7Zgc62jr22Cw6WywMsGLel9MgPQ60kzlM6Gfg5BtQoz24kXUByQTIKk359Q3ZvRXaaNP4gLIXTJ8Q8gzNm/Gt6FkmrYFEBucEtOeACKECJ8AIoRUOeYKIE+X+VuETXsCCKZC054AghCa9gQQxFD0BBD+n+cKRU8AQQwH44sjBBDHZFMeAoggCh4CiCA60iKAiKLJDgGkkCm9wGKiE0BIM0ma2gQQIJy5SwAIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIICCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgLoEgACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIICAAAIIIIAAAhTwDT1mmRwCLTq4AAAAAElFTkSuQmCC',
+    purple: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAE1klEQVR42u3cUUrjYBSGYRO6u6wh10KX0NtAl1DoauOViKCiNm1zzvc8d8MMw5D/nLd/teMwT8v6AhBo9AgAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQCDewSP48Ho8fft718vZAyJ2B7rO/zBPy+rA/0YMsQM9diA2gP85dCHE/PfagbgAbnXwQogdqD//UQG8R/xEEDtQdwdGB1/j7wc7IIC7PhgRxA7U2gGfAxRBzGSs0eGD+U/dudHhiy6k7oC3wCKIGfQW2OEDAggQcgkRQBAfN0AMIQgggAC6eQECCCCAAAK4c340FeAGCCCAbqKAAIIXX/oH0ACAHXQDdPiAAIIXYReAoAA+6xDc/sAN0FtRCJz/SjvnLbDgYiZj5380AOKHHfAW2AAYMOxA2A4M87SsaYOw9Y/LEj/Mf02RAdxqCIQPO1B7B2IDeMsQCB92oMcOxAfwN8MgeNiBnjsggEAsnwMEBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQR4loNHANzq9Xj69Ovr5Vzi3z3M07I6PuDW6H1l7yEUQGDz8FWJoAACdwlfhQj6GiCbLUOVr/vwuPDtnRsgmy+DEApflblwA2TzhXj/c0IofHsngNxtKYRQ+AQQiyWEoieApC+JEAqfAGL5hDAuej4GAz8spBi66QkgboVC2C56/icIlqrZ4jifHmfoBkiZpRbEOm9t/TQYLJ0Fiwle1XNxA6RNEDpFsdo3L6o+ezdAWi/n3hez+ndpq7/oCCCRi/uo5e36MZQut20BxIITFT0BRAiJDp8AIoTEhk8AEUIioyeAiCHR4RNAhFD04p+BACKGoieAIISiJ4AghqIngCCIgieAIIiCJ4AgiIIngCCKQieAIIxCJ4AQG0wxE0CAckaPABBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBAQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEBNAjAAQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEBBBBAAAEECPAGJfVTvTYEw2gAAAAASUVORK5CYII=',
+    crimson: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAE1UlEQVR42u3cUU7bUBCGUWxlQX7yIlA2lA04G4qyPfOEEBIgIE7imf+ct6pVVfnOfLmBlGGZ5vUFINDoEQACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIICAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAQLyDR/Dh9Hr89vfO14sHROwOdJ3/YZnm1YH/jRhiB3rsQGwA/3PoQoj577UDcQHc6uCFEDtQf/6jAniP+IkgdqDuDowOvsbfD3ZAAHd9MCKIHai1Az4HKIKYyVijwwfzn7pzo8MXXUjdAW+BRRAz6C2wwwcEECDkEiKAID5ugBhCEEAAAXTzAgQQQAABBHDn/GgqwA0QQADdRAEBBC++9A+gAQA76Abo8AEBBC/CLgBBAXzWIbj9gRugt6IQOP+Vds5bYMHFTMbO/2gAxA874C2wATBg2IGwHRiWaV7TBmHrH5clfpj/miIDuNUQCB92oPYOxAbwliEQPuxAjx2ID+BvhkHwsAM9d0AAgVg+BwgIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCPAsB48AuNXp9fjp1+frpcS/e1imeXV8wK3R+8reQyiAwObhqxJBAQTuEr4KEfQ1QDZbhipf9+Fx4ds7N0A2XwYhFL4qc+EGyOYL8f7nhFD49k4AudtSCKHwCSAWSwhFTwBJXxIhFD4BxPIJYVz0fAwGflhIMXTTE0DcCoWwXfT8TxAsVbPFcT49ztANkDJLLYh13tr6aTBYOgsWE7yq5+IGSJsgdIpitW9eVH32boC0Xs69L2b179JWf9ERQCIX91HL2/VjKF1u2wKIBScqegKIEBIdPgFECIkNnwAihERGTwARQ6LDJ4AIoejFPwMBRAxFTwBBCEVPAEEMRU8AQRAFTwBBEAVPAEEQBU8AQRSFTgBBGIVOACE2mGImgADljB4BIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCAgggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIICCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggIoEcACCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgIIIIAAAggQ4A0E40lDgzjkVAAAAABJRU5ErkJggg==',
+    sakura: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAE0klEQVR42u3c0U3jUBCGUWylPXdhuYJ04VTgZs0TQkiAgDjBM/85b6tdrVa+M19uIMuwTvP+AhBo9AgAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQCDexSN4d12WL3/vtm0eELE70HX+h3Wadwf+O2KIHeixA7EB/MuhCyHmv9cOxAXwqIMXQuxA/fmPCuAj4ieC2IG6OzA6+Bp/P9gBATz1wYggdqDWDvgcoAhiJmONDh/Mf+rOjQ5fdCF1B7wFFkHMoLfADh8QQICQS4gAgvi4AWIIQQABBNDNCxBAAAEEEMCT86OpADdAAAF0EwUEELz40j+ABgDsoBugwwcEELwIuwAEBfC/DsHtD9wAvRWFwPmvtHPeAgsuZjJ2/kcDIH7YAW+BDYABww6E7cCwTvOeNghH/7gs8cP81xQZwKOGQPiwA7V3IDaA9wyB8GEHeuxAfAB/MgyChx3ouQMCCMTyOUBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQID/cvEIgHtdl+XDr2/bVuLfPazTvDs+4N7ofebsIRRA4PDwVYmgAAIPCV+FCPoaIIctQ5Wv+/C88J2dGyCHL4MQCl+VuXAD5PCFePtzQih8ZyeAPGwphFD4BBCLJYSiJ4CkL4kQCp8AYvmEMC56PgYD3yykGLrpCSBuhULYLnr+JwiWqtniOJ8eZ+gGSJmlFsQ6b239NBgsnQWLCV7Vc3EDpE0QOkWx2jcvqj57N0BaL+fZF7P6d2mrv+gIIJGL+6zl7foxlC63bQHEghMVPQFECIkOnwAihMSGTwARQiKjJ4CIIdHhE0CEUPTin4EAIoaiJ4AghKIngCCGoieAIIiCJ4AgiIIngCCIgieAIIpCJ4AgjEIngBAbTDETQIByRo8AEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBAQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQE0CMABBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQEEEEAAAQQI8AoQ5VWcjO9+gAAAAABJRU5ErkJggg==',
+    shonen: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAE10lEQVR42u3c0U3jUBCGUWylGHeRDlxEakgXTg3pJZWZJ4SQAAFxgmf+c95Wu1qtfGe+3ECWYZmn9QUg0OgRAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAICCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIBAvINH8O58On75e5frzQMidge6zv+wzNPqwH9HDLEDPXYgNoB/OXQhxPz32oG4AG518EKIHag//1EBfET8RBA7UHcHRgdf4+8HOyCAuz4YEcQO1NoBnwMUQcxkrNHhg/lP3bnR4YsupO6At8AiiBn0FtjhAwIIEHIJEUAQHzdADCEIIIAAunkBAggggAACuHN+NBXgBggggG6igACCF1/6B9AAgB10A3T4gACCF2EXgKAA/tchuP2BG6C3ohA4/5V2zltgwcVMxs7/aADEDzvgLbABMGDYgbAdGJZ5WtMGYesflyV+mP+aIgO41RAIH3ag9g7EBvCeIRA+7ECPHYgP4E+GQfCwAz13QACBWD4HCAgggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAICCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAII8F8OHgFwr/Pp+OHXl+utxL97WOZpdXzAvdH7zN5DKIDA5uGrEkEBBB4SvgoR9DVANluGKl/34Xnh2zs3QDZfBiEUvipz4QbI5gvx9ueEUPj2TgB52FIIofAJIBZLCEVPAElfEiEUPgHE8glhXPR8DAa+WUgxdNMTQNwKhbBd9PxPECxVs8VxPj3O0A2QMkstiHXe2vppMFg6CxYTvKrn4gZImyB0imK1b15UffZugLRezr0vZvXv0lZ/0RFAIhf3Wcvb9WMoXW7bAogFJyp6AogQEh0+AUQIiQ2fACKEREZPABFDosMngAih6MU/AwFEDEVPAEEIRU8AQQxFTwBBEAVPAEEQBU8AQRAFTwBBFIVOAEEYhU4AITaYYiaAAOWMHgEggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIICCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgggIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCAigRwAIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACAggggAACCBDgFZcOTEMoFHKgAAAAAElFTkSuQmCC',
+    cyber: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAE10lEQVR42u3c0U3jUBCGUWylHZeRQnhwBU4Z6SGFpDjzhBASICBO4pn/nLfVrlYr35kvN5BlWKZ5fQEINHoEgAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIICCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCAQ7+ARfDgfX7/9vdP14gERuwNd539Ypnl14H8jhtiBHjsQG8D/HLoQYv577UBcALc6eCHEDtSf/6gA3iN+IogdqLsDo4Ov8feDHRDAXR+MCGIHau2AzwGKIGYy1ujwwfyn7tzo8EUXUnfAW2ARxAx6C+zwAQEECLmECCCIjxsghhAEEEAA3bwAAQQQQAAB3Dk/mgpwAwQQQDdRQADBiy/9A2gAwA66ATp8QADBi7ALQFAAn3UIbn/gBuitKATOf6Wd8xZYcDGTsfM/GgDxww54C2wADBh2IGwHhmWa17RB2PrHZYkf5r+myABuNQTChx2ovQOxAbxlCIQPO9BjB+ID+JthEDzsQM8dEEAgls8BAgIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACPMvBIwBudT6+fvr16Xop8e8elmleHR9wa/S+svcQCiCwefiqRFAAgbuEr0IEfQ2QzZahytd9eFz49s4NkM2XQQiFr8pcuAGy+UK8/zkhFL69E0DuthRCKHwCiMUSQtETQNKXRAiFTwCxfEIYFz0fg4EfFlIM3fQEELdCIWwXPf8TBEvVbHGcT48zdAOkzFILYp23tn4aDJbOgsUEr+q5uAHSJgidoljtmxdVn70bIK2Xc++LWf27tNVfdASQyMV91PJ2/RhKl9u2AGLBiYqeACKERIdPABFCYsMngAghkdETQMSQ6PAJIEIoevHPQAARQ9ETQBBC0RNAEEPRE0AQRMETQBBEwRNAEETBE0AQRaETQBBGoRNAiA2mmAkgQDmjRwAIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIICCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgLoEQACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIICAAAIIIIAAAgR4AxgZTdCBqO1xAAAAAElFTkSuQmCC',
+    ghibli: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAE1klEQVR42u3cMU7jUBSGUWxlV27d0mUXLrKW7CNdFmgqhJAAAXES3/uf041mNBr53fvlBTIM0zKvLwCBRo8AEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBAQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQTiHTyCD8fT67e/dzlfPSBid6Dr/A/TMq8O/G/EEDvQYwdiA/ifQxdCzH+vHYgL4FYHL4TYgfrzHxXAe8RPBLEDdXdgdPA1/n6wAwK464MRQexArR3wOUARxEzGGh0+mP/UnRsdvuhC6g54CyyCmEFvgR0+IIAAIZcQAQTxcQPEEIIAAgigmxcggAACCCCAO+dHUwFugAAC6CYKCCB48aV/AA0A2EE3QIcPCCB4EXYBCArgsw7B7Q/cAL0VhcD5r7Rz3gILLmYydv5HAyB+2AFvgQ2AAcMOhO3AMC3zmjYIW/+4LPHD/NcUGcCthkD4sAO1dyA2gLcMgfBhB3rsQHwAfzMMgocd6LkDAgjE8jlAQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEECAZzl4BMCtjqfXT7++nK8l/t3DtMyr4wNujd5X9h5CAQQ2D1+VCAogcJfwVYigrwGy2TJU+boPjwvf3rkBsvkyCKHwVZkLN0A2X4j3PyeEwrd3AsjdlkIIhU8AsVhCKHoCSPqSCKHwCSCWTwjjoudjMPDDQoqhm54A4lYohO2i53+CYKmaLY7z6XGGboCUWWpBrPPW1k+DwdJZsJjgVT0XN0DaBKFTFKt986Lqs3cDpPVy7n0xq3+XtvqLjgASubiPWt6uH0PpctsWQCw4UdETQISQ6PAJIEJIbPgEECEkMnoCiBgSHT4BRAhFL/4ZCCBiKHoCCEIoegIIYih6AgiCKHgCCIIoeAIIgih4AgiiKHQCCMIodAIIscEUMwEEKGf0CAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAQAA9AkAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBAQQAABBBBAgABv2TlJCIGDbL0AAAAASUVORK5CYII='
 });
 
+const THEME_KEY = 'anizone:theme:v1';
+const WATCH_SITES_KEY = 'anizone:watch-sites:v1';
+const WATCH_SITE_SELECTED_KEY = 'anizone:watch-site-selected:v1';
+const DEFAULT_WATCH_SITES = Object.freeze([
+    { id: 'setup-docs', name: 'Read Setup Docs', url: 'https://github.com/Legend-1125/Legend-1125.github.io' },
+]);
+const LEGACY_WATCH_SITE_MIGRATION_KEY = 'anizone:watch-site-docs-default:v2';
+function migrateLegacyWatchSiteDefault() {
+    if (localStorage.getItem(LEGACY_WATCH_SITE_MIGRATION_KEY)) return;
+    const stored = loadJson(WATCH_SITES_KEY, null);
+    const onlySite = Array.isArray(stored) && stored.length === 1 ? stored[0] : null;
+    const isOldDefault = onlySite && (
+        (onlySite.name === 'Anikoto' && String(onlySite.url || '').includes('anikototv.to')) ||
+        (onlySite.name === 'Temporary Site' && String(onlySite.url || '').includes('example.com'))
+    );
+    if (!stored || isOldDefault) {
+        saveJson(WATCH_SITES_KEY, DEFAULT_WATCH_SITES.map(site => ({ ...site })));
+        localStorage.setItem(WATCH_SITE_SELECTED_KEY, DEFAULT_WATCH_SITES[0].id);
+    }
+    localStorage.setItem(LEGACY_WATCH_SITE_MIGRATION_KEY, 'done');
+}
+function getWatchSites() {
+    const stored = loadJson(WATCH_SITES_KEY, null);
+    if (!Array.isArray(stored) || !stored.length) return DEFAULT_WATCH_SITES.map(site => ({ ...site }));
+    return stored.filter(site => site?.id && site?.name && isSecureWebsiteUrl(site?.url)).slice(0, 3);
+}
+function isSecureWebsiteUrl(value) {
+    try { return new URL(String(value)).protocol === 'https:'; } catch { return false; }
+}
+function buildWatchUrl(template, title) {
+    const safeTemplate = isSecureWebsiteUrl(template) ? template : DEFAULT_WATCH_SITES[0].url;
+    return safeTemplate.includes('{query}') ? safeTemplate.replaceAll('{query}', encodeURIComponent(title)) : safeTemplate;
+}
+function getSelectedWatchSite() {
+    const sites = getWatchSites();
+    const selectedId = localStorage.getItem(WATCH_SITE_SELECTED_KEY);
+    return sites.find(site => site.id === selectedId) || sites[0] || DEFAULT_WATCH_SITES[0];
+}
+function refreshCurrentStreamingLinks() {
+    if (currentDetailAnime && !document.getElementById('view-details')?.classList.contains('hidden')) buildStreamingLinks(currentDetailAnime);
+}
 function initThemes() {
     const host = document.getElementById('theme-options');
     const menuButton = document.getElementById('theme-menu-btn');
     const menuPanel = document.getElementById('theme-menu-panel');
     const avatar = document.getElementById('theme-avatar-image');
-    if (!host || !menuButton || !menuPanel || !avatar) return;
+    const watchHost = document.getElementById('watch-site-options');
+    const addWatchSiteButton = document.getElementById('add-watch-site-btn');
+    if (!host || !menuButton || !menuPanel || !avatar || !watchHost || !addWatchSiteButton) return;
 
     const themes = [
-        { id: 'default', label: 'AniZone', avatar: THEME_AVATAR_DATA.default },
-        { id: 'sakura', label: 'Sakura', avatar: THEME_AVATAR_DATA.sakura },
-        { id: 'shonen', label: 'Shōnen', avatar: THEME_AVATAR_DATA.shonen },
-        { id: 'cyber', label: 'Cyberpunk', avatar: THEME_AVATAR_DATA.cyber },
-        { id: 'ghibli', label: 'Forest Spirit', avatar: THEME_AVATAR_DATA.ghibli },
+        { id: 'default', label: 'AniZone', color: '#8B5CF6', avatar: THEME_AVATAR_DATA.purple },
+        { id: 'crimson', label: 'Crimson Pulse', color: '#E50914', avatar: THEME_AVATAR_DATA.crimson },
+        { id: 'sakura', label: 'Sakura', color: '#ff5c8a', avatar: THEME_AVATAR_DATA.sakura },
+        { id: 'shonen', label: 'Shōnen', color: '#ff5a1f', avatar: THEME_AVATAR_DATA.shonen },
+        { id: 'cyber', label: 'Cyberpunk', color: '#f72585', avatar: THEME_AVATAR_DATA.cyber },
+        { id: 'ghibli', label: 'Forest Spirit', color: '#4CAF50', avatar: THEME_AVATAR_DATA.ghibli },
     ];
 
     const closeMenu = () => {
@@ -1770,7 +1833,6 @@ function initThemes() {
         menuButton.setAttribute('aria-expanded', 'false');
         document.getElementById('theme-menu-wrap')?.classList.remove('open');
     };
-
     const apply = value => {
         const selected = themes.find(theme => theme.id === value) || themes[0];
         if (selected.id === 'default') document.documentElement.removeAttribute('data-theme');
@@ -1780,23 +1842,54 @@ function initThemes() {
         avatar.alt = `${selected.label} theme`;
         host.querySelectorAll('.theme-option').forEach(button => button.classList.toggle('active', button.dataset.theme === selected.id));
     };
+    const persistSites = sites => saveJson(WATCH_SITES_KEY, sites.slice(0, 3));
+    const renderWatchSites = () => {
+        const sites = getWatchSites();
+        const selected = getSelectedWatchSite();
+        watchHost.innerHTML = '';
+        sites.forEach(site => {
+            const row = document.createElement('label');
+            row.className = 'watch-site-row';
+            row.title = site.url;
+            row.innerHTML = `<input type="radio" name="watch-site" value="${escapeHtml(site.id)}" ${site.id === selected.id ? 'checked' : ''}><span class="watch-site-name">${escapeHtml(site.name)}</span><button class="watch-site-remove" type="button" aria-label="Remove ${escapeHtml(site.name)}">×</button>`;
+            row.querySelector('input').addEventListener('change', () => {
+                localStorage.setItem(WATCH_SITE_SELECTED_KEY, site.id);
+                refreshCurrentStreamingLinks();
+            });
+            row.querySelector('.watch-site-remove').addEventListener('click', event => {
+                event.preventDefault(); event.stopPropagation();
+                const next = getWatchSites().filter(item => item.id !== site.id);
+                if (!next.length) return siteAlert('Keep at least one watch website.', { title: 'Website required' });
+                persistSites(next);
+                if (localStorage.getItem(WATCH_SITE_SELECTED_KEY) === site.id) localStorage.setItem(WATCH_SITE_SELECTED_KEY, next[0].id);
+                renderWatchSites(); refreshCurrentStreamingLinks();
+            });
+            watchHost.appendChild(row);
+        });
+        addWatchSiteButton.disabled = sites.length >= 3;
+    };
 
     host.innerHTML = '';
     themes.forEach(theme => {
         const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'theme-option';
-        button.dataset.theme = theme.id;
-        button.setAttribute('role', 'menuitem');
+        button.type = 'button'; button.className = 'theme-option'; button.dataset.theme = theme.id; button.setAttribute('role', 'menuitem');
         button.innerHTML = `<span class="theme-swatch" style="--theme-swatch:${theme.color}"></span><span>${theme.label}</span>`;
-        button.addEventListener('click', event => {
-            event.stopPropagation();
-            apply(theme.id);
-            closeMenu();
-        });
+        button.addEventListener('click', event => { event.stopPropagation(); apply(theme.id); });
         host.appendChild(button);
     });
-
+    addWatchSiteButton.addEventListener('click', async event => {
+        event.stopPropagation();
+        const sites = getWatchSites();
+        if (sites.length >= 3) return;
+        const name = (prompt('Website name (example: Crunchyroll)') || '').trim();
+        if (!name) return;
+        const url = (prompt('HTTPS website link. Add {query} where the anime title should go.') || '').trim();
+        if (!isSecureWebsiteUrl(url)) return siteAlert('Only valid HTTPS links are allowed.', { title: 'Invalid website link' });
+        const site = { id: `site-${Date.now()}`, name: name.slice(0, 40), url };
+        persistSites([...sites, site]);
+        localStorage.setItem(WATCH_SITE_SELECTED_KEY, site.id);
+        renderWatchSites(); refreshCurrentStreamingLinks();
+    });
     menuButton.addEventListener('click', event => {
         event.stopPropagation();
         const opening = menuPanel.classList.contains('hidden');
@@ -1804,15 +1897,14 @@ function initThemes() {
         menuButton.setAttribute('aria-expanded', String(opening));
         document.getElementById('theme-menu-wrap')?.classList.toggle('open', opening);
     });
-    document.addEventListener('click', event => {
-        if (!document.getElementById('theme-menu-wrap')?.contains(event.target)) closeMenu();
-    });
+    menuPanel.addEventListener('click', event => event.stopPropagation());
+    document.addEventListener('click', event => { if (!document.getElementById('theme-menu-wrap')?.contains(event.target)) closeMenu(); });
     document.addEventListener('keydown', event => { if (event.key === 'Escape') closeMenu(); });
 
+    migrateLegacyWatchSiteDefault();
     apply(localStorage.getItem(THEME_KEY) || 'default');
+    renderWatchSites();
 }
-
-const THEME_KEY = 'anizone:theme:v1';
 let countdownTimer = null;
 function loadJson(key, fallback) { try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); } catch { return fallback; } }
 function saveJson(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
