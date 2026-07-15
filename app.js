@@ -1290,7 +1290,7 @@ function renderAnimeDetails(anime) {
     document.getElementById('detail-synopsis').textContent = stripHtml(anime.description) || 'No synopsis available.';
     const adultWarning = document.getElementById('detail-adult-warning');
     if (adultWarning) adultWarning.classList.toggle('hidden', !anime.isAdult);
-    document.getElementById('badge-score').textContent = anime.averageScore ? `★ AniList ${(anime.averageScore / 10).toFixed(1)} / 10` : 'AniList —';
+    document.getElementById('badge-score').textContent = anime.averageScore ? `★ AniList ${Math.round(anime.averageScore)}` : 'AniList —';
     const malBadge = document.getElementById('badge-mal-score');
     if (malBadge) {
         malBadge.textContent = anime.idMal ? 'MAL …' : 'MAL N/A';
@@ -1312,7 +1312,7 @@ async function loadMalScoreIntoDetails(anime) {
     try {
         const score = await fetchMalScore(anime.idMal);
         if (currentDetailAnime?.id !== anime.id) return;
-        badge.textContent = score != null ? `★ MAL ${Number(score).toFixed(2)} / 10` : 'MAL N/A';
+        badge.textContent = score != null ? `★ MAL ${Number(score).toFixed(2)}` : 'MAL N/A';
     } catch (error) {
         if (currentDetailAnime?.id !== anime.id) return;
         badge.textContent = 'MAL —';
@@ -1760,6 +1760,67 @@ function siteConfirm(message, options = {}) {
 }
 
 // Local visual themes do not require MAL or AniList login.
+
+function siteWebsiteForm() {
+    const overlay = document.getElementById('site-dialog');
+    const titleEl = document.getElementById('site-dialog-title');
+    const messageEl = document.getElementById('site-dialog-message');
+    const fields = document.getElementById('site-dialog-fields');
+    const nameInput = document.getElementById('site-dialog-name');
+    const urlInput = document.getElementById('site-dialog-url');
+    const errorEl = document.getElementById('site-dialog-error');
+    const confirm = document.getElementById('site-dialog-confirm');
+    const cancel = document.getElementById('site-dialog-cancel');
+    const close = document.getElementById('site-dialog-close');
+    if (!overlay || !titleEl || !messageEl || !fields || !nameInput || !urlInput || !errorEl || !confirm || !cancel || !close) return Promise.resolve(null);
+
+    titleEl.textContent = 'Save watch website';
+    messageEl.textContent = 'Add a name and a secure HTTPS link. Use {query} where the anime title should be inserted.';
+    fields.classList.remove('hidden');
+    errorEl.classList.add('hidden');
+    errorEl.textContent = '';
+    nameInput.value = '';
+    urlInput.value = '';
+    confirm.textContent = 'Save Address';
+    confirm.classList.remove('btn-danger');
+    confirm.classList.add('btn-primary');
+    cancel.textContent = 'Cancel';
+    cancel.classList.remove('hidden');
+    overlay.classList.remove('hidden');
+
+    return new Promise(resolve => {
+        const finish = value => {
+            overlay.classList.add('hidden');
+            fields.classList.add('hidden');
+            confirm.onclick = null; cancel.onclick = null; close.onclick = null; overlay.onclick = null;
+            nameInput.onkeydown = null; urlInput.onkeydown = null;
+            resolve(value);
+        };
+        const submit = () => {
+            const name = nameInput.value.trim();
+            const url = urlInput.value.trim();
+            let error = '';
+            if (!name) error = 'Enter a website name.';
+            else if (!isSecureWebsiteUrl(url)) error = 'Enter a valid link beginning with https://';
+            if (error) {
+                errorEl.textContent = error;
+                errorEl.classList.remove('hidden');
+                (name ? urlInput : nameInput).focus();
+                return;
+            }
+            finish({ name: name.slice(0, 40), url });
+        };
+        confirm.onclick = submit;
+        cancel.onclick = () => finish(null);
+        close.onclick = () => finish(null);
+        overlay.onclick = event => { if (event.target === overlay) finish(null); };
+        const enterToSubmit = event => { if (event.key === 'Enter') { event.preventDefault(); submit(); } };
+        nameInput.onkeydown = enterToSubmit;
+        urlInput.onkeydown = enterToSubmit;
+        requestAnimationFrame(() => nameInput.focus());
+    });
+}
+
 const THEME_AVATAR_DATA = Object.freeze({
     purple: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAE1klEQVR42u3cUUrjYBSGYRO6u6wh10KX0NtAl1DoauOViKCiNm1zzvc8d8MMw5D/nLd/teMwT8v6AhBo9AgAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQCDewSP48Ho8fft718vZAyJ2B7rO/zBPy+rA/0YMsQM9diA2gP85dCHE/PfagbgAbnXwQogdqD//UQG8R/xEEDtQdwdGB1/j7wc7IIC7PhgRxA7U2gGfAxRBzGSs0eGD+U/dudHhiy6k7oC3wCKIGfQW2OEDAggQcgkRQBAfN0AMIQgggAC6eQECCCCAAAK4c340FeAGCCCAbqKAAIIXX/oH0ACAHXQDdPiAAIIXYReAoAA+6xDc/sAN0FtRCJz/SjvnLbDgYiZj5380AOKHHfAW2AAYMOxA2A4M87SsaYOw9Y/LEj/Mf02RAdxqCIQPO1B7B2IDeMsQCB92oMcOxAfwN8MgeNiBnjsggEAsnwMEBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQR4loNHANzq9Xj69Ovr5Vzi3z3M07I6PuDW6H1l7yEUQGDz8FWJoAACdwlfhQj6GiCbLUOVr/vwuPDtnRsgmy+DEApflblwA2TzhXj/c0IofHsngNxtKYRQ+AQQiyWEoieApC+JEAqfAGL5hDAuej4GAz8spBi66QkgboVC2C56/icIlqrZ4jifHmfoBkiZpRbEOm9t/TQYLJ0Fiwle1XNxA6RNEDpFsdo3L6o+ezdAWi/n3hez+ndpq7/oCCCRi/uo5e36MZQut20BxIITFT0BRAiJDp8AIoTEhk8AEUIioyeAiCHR4RNAhFD04p+BACKGoieAIISiJ4AghqIngCCIgieAIIiCJ4AgiIIngCCKQieAIIxCJ4AQG0wxE0CAckaPABBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBAQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEBNAjAAQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEBBBBAAAEECPAGJfVTvTYEw2gAAAAASUVORK5CYII=',
     crimson: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAE1UlEQVR42u3cUU7bUBCGUWxlQX7yIlA2lA04G4qyPfOEEBIgIE7imf+ct6pVVfnOfLmBlGGZ5vUFINDoEQACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIICAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAQLyDR/Dh9Hr89vfO14sHROwOdJ3/YZnm1YH/jRhiB3rsQGwA/3PoQoj577UDcQHc6uCFEDtQf/6jAniP+IkgdqDuDowOvsbfD3ZAAHd9MCKIHai1Az4HKIKYyVijwwfzn7pzo8MXXUjdAW+BRRAz6C2wwwcEECDkEiKAID5ugBhCEEAAAXTzAgQQQAABBHDn/GgqwA0QQADdRAEBBC++9A+gAQA76Abo8AEBBC/CLgBBAXzWIbj9gRugt6IQOP+Vds5bYMHFTMbO/2gAxA874C2wATBg2IGwHRiWaV7TBmHrH5clfpj/miIDuNUQCB92oPYOxAbwliEQPuxAjx2ID+BvhkHwsAM9d0AAgVg+BwgIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCPAsB48AuNXp9fjp1+frpcS/e1imeXV8wK3R+8reQyiAwObhqxJBAQTuEr4KEfQ1QDZbhipf9+Fx4ds7N0A2XwYhFL4qc+EGyOYL8f7nhFD49k4AudtSCKHwCSAWSwhFTwBJXxIhFD4BxPIJYVz0fAwGflhIMXTTE0DcCoWwXfT8TxAsVbPFcT49ztANkDJLLYh13tr6aTBYOgsWE7yq5+IGSJsgdIpitW9eVH32boC0Xs69L2b179JWf9ERQCIX91HL2/VjKF1u2wKIBScqegKIEBIdPgFECIkNnwAihERGTwARQ6LDJ4AIoejFPwMBRAxFTwBBCEVPAEEMRU8AQRAFTwBBEAVPAEEQBU8AQRSFTgBBGIVOACE2mGImgADljB4BIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCAgggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIICCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggIoEcACCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgIIIIAAAggQ4A0E40lDgzjkVAAAAABJRU5ErkJggg==',
@@ -1773,16 +1834,17 @@ const THEME_KEY = 'anizone:theme:v1';
 const WATCH_SITES_KEY = 'anizone:watch-sites:v1';
 const WATCH_SITE_SELECTED_KEY = 'anizone:watch-site-selected:v1';
 const DEFAULT_WATCH_SITES = Object.freeze([
-    { id: 'setup-docs', name: 'Read Setup Docs', url: 'https://github.com/Legend-1125/Legend-1125.github.io' },
+    { id: 'setup-docs', name: 'Read Setup Docs', url: 'https://github.com/Legend-1125/Legend-1125.github.io/blob/main/README.md' },
 ]);
-const LEGACY_WATCH_SITE_MIGRATION_KEY = 'anizone:watch-site-docs-default:v2';
+const LEGACY_WATCH_SITE_MIGRATION_KEY = 'anizone:watch-site-docs-default:v3';
 function migrateLegacyWatchSiteDefault() {
     if (localStorage.getItem(LEGACY_WATCH_SITE_MIGRATION_KEY)) return;
     const stored = loadJson(WATCH_SITES_KEY, null);
     const onlySite = Array.isArray(stored) && stored.length === 1 ? stored[0] : null;
     const isOldDefault = onlySite && (
         (onlySite.name === 'Anikoto' && String(onlySite.url || '').includes('anikototv.to')) ||
-        (onlySite.name === 'Temporary Site' && String(onlySite.url || '').includes('example.com'))
+        (onlySite.name === 'Temporary Site' && String(onlySite.url || '').includes('example.com')) ||
+        (onlySite.name === 'Read Setup Docs' && String(onlySite.url || '') === 'https://github.com/Legend-1125/Legend-1125.github.io')
     );
     if (!stored || isOldDefault) {
         saveJson(WATCH_SITES_KEY, DEFAULT_WATCH_SITES.map(site => ({ ...site })));
@@ -1881,11 +1943,9 @@ function initThemes() {
         event.stopPropagation();
         const sites = getWatchSites();
         if (sites.length >= 3) return;
-        const name = (prompt('Website name (example: Crunchyroll)') || '').trim();
-        if (!name) return;
-        const url = (prompt('HTTPS website link. Add {query} where the anime title should go.') || '').trim();
-        if (!isSecureWebsiteUrl(url)) return siteAlert('Only valid HTTPS links are allowed.', { title: 'Invalid website link' });
-        const site = { id: `site-${Date.now()}`, name: name.slice(0, 40), url };
+        const website = await siteWebsiteForm();
+        if (!website) return;
+        const site = { id: `site-${Date.now()}`, name: website.name, url: website.url };
         persistSites([...sites, site]);
         localStorage.setItem(WATCH_SITE_SELECTED_KEY, site.id);
         renderWatchSites(); refreshCurrentStreamingLinks();

@@ -132,10 +132,57 @@ body {
     cursor: pointer;
     user-select: none;
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    gap: 9px;
     line-height: 1;
 }
 
+.logo-lockup {
+    display: flex;
+    flex-direction: column;
+}
+
+.zone-eye-logo {
+    width: 42px;
+    height: 30px;
+    overflow: visible;
+    filter: drop-shadow(0 0 8px color-mix(in srgb, var(--accent-red) 55%, transparent));
+    transition: transform 0.25s var(--transition-smooth), filter 0.25s ease;
+}
+
+.brand-logo:hover .zone-eye-logo {
+    transform: scale(1.08);
+    filter: drop-shadow(0 0 13px color-mix(in srgb, var(--accent-red) 75%, transparent));
+}
+
+.zone-eye-outline {
+    fill: color-mix(in srgb, var(--accent-red) 15%, #09090b);
+    stroke: var(--accent-red);
+    stroke-width: 2.4;
+}
+
+.zone-eye-lid {
+    fill: none;
+    stroke: rgba(255,255,255,0.9);
+    stroke-width: 1.5;
+    stroke-linecap: round;
+}
+
+.zone-eye-iris {
+    fill: color-mix(in srgb, var(--accent-red) 68%, #ffffff);
+    stroke: rgba(255,255,255,0.9);
+    stroke-width: 1;
+}
+
+.zone-eye-pupil { fill: #09090b; }
+.zone-eye-z {
+    fill: none;
+    stroke: var(--accent-red);
+    stroke-width: 2.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.zone-eye-glint { fill: #fff; }
 
 .logo-text {
     font-size: 22px;
@@ -1145,8 +1192,8 @@ body {
 }
 
 .current-node {
-    border-color: rgba(229,9,20,0.5);
-    background: rgba(229,9,20,0.04);
+    border-color: color-mix(in srgb, var(--accent-red) 50%, transparent);
+    background: color-mix(in srgb, var(--accent-red) 4%, transparent);
 }
 
 .current-node .timeline-dot {
@@ -2026,3 +2073,54 @@ body {
     border-color: var(--theme-accent, var(--accent-red));
     background: color-mix(in srgb, var(--theme-accent, var(--accent-red)) 14%, transparent);
 }
+
+
+/* Original AniZone wordmark; Zone Eye is reserved for the browser tab icon. */
+.brand-logo { display: flex; flex-direction: column; align-items: flex-start; gap: 0; line-height: 1; }
+.logo-lockup, .zone-eye-logo { display: none !important; }
+
+/* Themed in-site website form */
+.site-dialog-fields { display: grid; gap: 14px; margin-top: 18px; }
+.site-dialog-field { display: grid; gap: 7px; }
+.site-dialog-field span { font-size: 12px; font-weight: 700; color: rgba(255,255,255,.82); }
+.site-dialog-field input { width: 100%; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; background: rgba(255,255,255,.055); color: var(--text-white); padding: 11px 12px; outline: none; font: inherit; transition: border-color .2s, box-shadow .2s, background .2s; }
+.site-dialog-field input::placeholder { color: rgba(255,255,255,.35); }
+.site-dialog-field input:focus { border-color: var(--accent-red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-red) 22%, transparent); background: rgba(255,255,255,.075); }
+.site-dialog-error { color: #ffb4b4; background: rgba(229,9,20,.12); border: 1px solid rgba(229,9,20,.35); border-radius: 8px; padding: 9px 10px; font-size: 12px; line-height: 1.4; }
+
+/* Premium scrollbar-free presentation; scrolling remains fully enabled. */
+html, body, * { scrollbar-width: none; }
+html::-webkit-scrollbar, body::-webkit-scrollbar, *::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+}
+
+.github-settings-link {
+    margin-top: 10px;
+    min-height: 46px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    border: 1px solid rgba(255,255,255,.13);
+    border-radius: 10px;
+    background: linear-gradient(135deg, rgba(255,255,255,.08), rgba(255,255,255,.025));
+    color: var(--text-white);
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: .02em;
+    transition: transform .2s var(--transition-smooth), border-color .2s, background .2s, box-shadow .2s;
+}
+.github-settings-link:hover {
+    transform: translateY(-1px);
+    border-color: var(--accent-red);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--accent-red) 18%, transparent), rgba(255,255,255,.04));
+    box-shadow: 0 8px 22px rgba(0,0,0,.28);
+}
+.github-settings-link:focus-visible {
+    outline: 2px solid var(--accent-red);
+    outline-offset: 2px;
+}
+.github-settings-link svg { flex: 0 0 auto; }
