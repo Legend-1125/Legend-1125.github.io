@@ -68,6 +68,18 @@ function loadCompactHistory() {
 
 let clickHistory = loadCompactHistory();
 let titleLanguage = localStorage.getItem('anizoneTitleLanguage') || 'english';
+const ADULT_DEFAULT_MIGRATION_KEY = 'anizone:adult-default-off:v1';
+if (!localStorage.getItem(ADULT_DEFAULT_MIGRATION_KEY)) {
+    localStorage.setItem('anizoneAdultEnabled', 'false');
+    localStorage.setItem('anizoneDiscoverAdultMode', 'regular');
+    localStorage.setItem(ADULT_DEFAULT_MIGRATION_KEY, 'done');
+}
+const ADULT_DEFAULT_OFF_MIGRATION = 'anizoneAdultDefaultOffV1';
+if (!localStorage.getItem(ADULT_DEFAULT_OFF_MIGRATION)) {
+    localStorage.setItem('anizoneAdultEnabled', 'false');
+    localStorage.setItem('anizoneDiscoverAdultMode', 'regular');
+    localStorage.setItem(ADULT_DEFAULT_OFF_MIGRATION, 'true');
+}
 let adultContentEnabled = localStorage.getItem('anizoneAdultEnabled') === 'true';
 let castLanguage = localStorage.getItem('anizoneCastLanguage') || 'JAPANESE';
 let currentCastEdges = [];
@@ -82,10 +94,12 @@ let selectedStudioId = null;
 let selectedStudioName = '';
 let selectedDiscoverGenre = '';
 let selectedDiscoverYear = String(new Date().getFullYear());
-let selectedDiscoverSeason = getCurrentSeason();
+let selectedDiscoverSeason = '';
 let selectedDiscoverType = '';
 let selectedDiscoverStatus = '';
 let selectedDiscoverRating = '';
+let selectedSearchYear = '';
+let selectedSearchOrder = 'default';
 let resultsPageInfo = null;
 let resultsRequestToken = 0;
 let suggestionController = null;
@@ -93,6 +107,7 @@ let heroSlides = [];
 let heroSlideIndex = 0;
 let heroInterval = null;
 let scheduleInitialized = false;
+const dashboardPools = { trending: [], top: [], discover: [] };
 
 const views = document.querySelectorAll('.tab-view');
 const navButtons = document.querySelectorAll('.nav-btn');
@@ -145,7 +160,8 @@ function formatFormat(format) {
     return ({ TV: 'TV', TV_SHORT: 'TV Short', MOVIE: 'Movie', SPECIAL: 'Special', OVA: 'OVA', ONA: 'ONA', MUSIC: 'Music' })[format] || format || 'Anime';
 }
 function seasonLabel() {
-    return `${selectedDiscoverSeason.charAt(0)}${selectedDiscoverSeason.slice(1).toLowerCase()} ${selectedDiscoverYear}`;
+    const season = selectedDiscoverSeason ? `${selectedDiscoverSeason.charAt(0)}${selectedDiscoverSeason.slice(1).toLowerCase()} ` : '';
+    return `${season}${selectedDiscoverYear}`.trim();
 }
 
 function cacheGet(key) {
@@ -199,41 +215,80 @@ function setCachedMalScore(malId, score) {
         // MAL scores are optional; never let storage issues break the detail page.
     }
 }
-async function jikanRequest(path, { retries = 1 } = {}) {
-    let lastError = null;
-    for (let attempt = 0; attempt <= retries; attempt++) {
-        try {
-            const response = await fetch(`${JIKAN_API}${path}`, { headers: { Accept: 'application/json' } });
-            let payload = null;
-            try { payload = await response.json(); } catch { /* handled below */ }
-            if (response.ok) return payload;
-            const message = payload?.message || `Jikan request failed (${response.status}).`;
-            lastError = new Error(message);
-            if ((response.status === 429 || response.status >= 500) && attempt < retries) {
-                const retryAfter = Number(response.headers.get('Retry-After')) || (attempt + 1) * 2;
-                await delay(retryAfter * 1000);
-                continue;
-            }
-            throw lastError;
-        } catch (error) {
-            lastError = error;
-            if (attempt < retries) {
-                await delay((attempt + 1) * 1000);
-                continue;
+const JIKAN_CACHE_PREFIX = 'anizone:jikan:v3:';
+const JIKAN_DEFAULT_TTL = 12 * 60 * 60 * 1000;
+const jikanInflight = new Map();
+let jikanQueue = Promise.resolve();
+let lastJikanRequestAt = 0;
+let jikanCooldownUntil = 0;
+function jikanCacheRead(path, allowStale = false) {
+    try {
+        const record = JSON.parse(localStorage.getItem(JIKAN_CACHE_PREFIX + path) || 'null');
+        if (!record) return null;
+        if (!allowStale && Date.now() > record.expiresAt) return null;
+        return record.value;
+    } catch { return null; }
+}
+function jikanCacheWrite(path, value, ttl) {
+    try { localStorage.setItem(JIKAN_CACHE_PREFIX + path, JSON.stringify({ value, expiresAt: Date.now() + ttl })); } catch {}
+}
+async function jikanRequest(path, { retries = 1, ttl = JIKAN_DEFAULT_TTL, force = false } = {}) {
+    if (!force) {
+        const cached = jikanCacheRead(path);
+        if (cached) return cached;
+    }
+    if (jikanInflight.has(path)) return jikanInflight.get(path);
+    const task = jikanQueue = jikanQueue.catch(() => {}).then(async () => {
+        const stale = jikanCacheRead(path, true);
+        let lastError = null;
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+                const wait = Math.max(0, jikanCooldownUntil - Date.now(), 1250 - (Date.now() - lastJikanRequestAt));
+                if (wait) await delay(wait);
+                lastJikanRequestAt = Date.now();
+                const response = await fetch(`${JIKAN_API}${path}`, { headers: { Accept: 'application/json' } });
+                let payload = null;
+                try { payload = await response.json(); } catch {}
+                if (response.ok) { jikanCacheWrite(path, payload, ttl); return payload; }
+                const retryAfter = Number(response.headers.get('Retry-After')) || Math.min(12, 2 ** (attempt + 1));
+                if (response.status === 429) jikanCooldownUntil = Date.now() + retryAfter * 1000;
+                lastError = new Error(response.status === 429 ? 'Extra MyAnimeList data is temporarily rate-limited.' : (payload?.message || `Jikan request failed (${response.status}).`));
+                if ((response.status === 429 || response.status >= 500) && attempt < retries) { await delay(retryAfter * 1000); continue; }
+                break;
+            } catch (error) {
+                lastError = error;
+                if (attempt < retries) { await delay((attempt + 1) * 1200); continue; }
             }
         }
-    }
-    throw lastError || new Error('Unable to reach Jikan.');
+        if (stale) return stale;
+        throw lastError || new Error('Unable to load extra MyAnimeList data.');
+    }).finally(() => jikanInflight.delete(path));
+    jikanInflight.set(path, task);
+    return task;
+}
+async function getJikanAnimeFull(malId) {
+    if (!malId) return null;
+    const payload = await jikanRequest(`/anime/${Number(malId)}/full`, { retries: 0, ttl: 24 * 60 * 60 * 1000 });
+    return payload?.data || null;
 }
 async function fetchMalScore(malId) {
     if (!malId) return null;
     const cached = getCachedMalScore(malId);
     if (cached != null) return cached;
-    const payload = await jikanRequest(`/anime/${Number(malId)}`, { retries: 0 });
-    const score = payload?.data?.score;
+
+    let score = null;
+    try {
+            const payload = await jikanRequest(`/anime/${Number(malId)}`, { retries: 1, ttl: 24 * 60 * 60 * 1000 });
+            score = payload?.data?.score ?? null;
+    } catch {
+        const staleCompact = jikanCacheRead(`/anime/${Number(malId)}`, true);
+        const staleFull = jikanCacheRead(`/anime/${Number(malId)}/full`, true);
+        score = staleCompact?.data?.score ?? staleFull?.data?.score ?? null;
+    }
     if (score != null) setCachedMalScore(malId, score);
-    return score ?? null;
+    return score;
 }
+
 async function getAnimeByMalId(malId) {
     const query = `query ($idMal: Int!) {
         Media(idMal: $idMal, type: ANIME) { id idMal isAdult title { romaji english native } }
@@ -250,47 +305,89 @@ class AniListError extends Error {
     }
 }
 
+const ANILIST_CACHE_STALE_TTL = 7 * 24 * 60 * 60 * 1000;
+const aniInflight = new Map();
+let aniQueue = Promise.resolve();
+let aniLastRequestAt = 0;
+let aniCooldownUntil = 0;
+let aniRemaining = 30;
+let aniResetAt = 0;
+
+function cacheGetStale(key) {
+    try {
+        const record = JSON.parse(localStorage.getItem(CACHE_PREFIX + key) || 'null');
+        if (!record || !record.value) return null;
+        const agePastExpiry = Date.now() - Number(record.expiresAt || 0);
+        return agePastExpiry <= ANILIST_CACHE_STALE_TTL ? record.value : null;
+    } catch { return null; }
+}
+
+function updateAniRateState(response) {
+    const remaining = Number(response.headers.get('X-RateLimit-Remaining'));
+    const reset = Number(response.headers.get('X-RateLimit-Reset'));
+    if (Number.isFinite(remaining)) aniRemaining = remaining;
+    if (Number.isFinite(reset) && reset > 0) aniResetAt = reset > 10_000_000_000 ? reset : reset * 1000;
+    const retryAfter = Number(response.headers.get('Retry-After'));
+    if (response.status === 429) {
+        const fallback = aniResetAt > Date.now() ? aniResetAt - Date.now() : 65_000;
+        aniCooldownUntil = Date.now() + (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : fallback);
+    }
+}
+
 async function aniRequest(query, variables = {}, options = {}) {
-    const { cacheKey = '', ttl = 0, signal } = options;
+    const { cacheKey = '', ttl = 0, signal, priority = 'normal' } = options;
+    const inflightKey = cacheKey || `${query}:${JSON.stringify(variables)}`;
     if (cacheKey) {
         const cached = cacheGet(cacheKey);
         if (cached) return cached;
     }
+    if (aniInflight.has(inflightKey)) return aniInflight.get(inflightKey);
 
-    let response;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    const task = aniQueue = aniQueue.catch(() => {}).then(async () => {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const stale = cacheKey ? cacheGetStale(cacheKey) : null;
+        // AniList documents a temporary degraded limit of 30 requests/minute.
+        // Keep the client below that ceiling and stop retry storms when the API says 429.
+        const baseSpacing = priority === 'interactive' ? 2050 : 2200;
+        const waitForSpacing = baseSpacing - (Date.now() - aniLastRequestAt);
+        const waitForReset = aniRemaining <= 1 && aniResetAt > Date.now() ? aniResetAt - Date.now() + 500 : 0;
+        const wait = Math.max(0, aniCooldownUntil - Date.now(), waitForSpacing, waitForReset);
+        if (wait) await delay(wait);
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+        let response;
         try {
+            aniLastRequestAt = Date.now();
             response = await fetch(ANILIST_API, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
                 body: JSON.stringify({ query, variables }),
                 signal,
             });
+            updateAniRateState(response);
         } catch (error) {
             if (error.name === 'AbortError') throw error;
-            if (attempt < 2) { await delay(700 * (attempt + 1)); continue; }
-            throw new AniListError('Unable to reach AniList. Check your connection and try again.');
+            if (stale) return stale;
+            throw new AniListError('AniList is temporarily unreachable. Cached pages will continue to work when available.');
         }
 
-        if ((response.status === 429 || response.status >= 500) && attempt < 2) {
-            const retryAfter = Number(response.headers.get('Retry-After')) || 1 + attempt;
-            await delay(retryAfter * 1000);
-            continue;
+        let payload = null;
+        try { payload = await response.json(); } catch {}
+        if (response.status === 429) {
+            if (stale) return stale;
+            throw new AniListError('AniList is temporarily rate-limited. Please wait about a minute before requesting new uncached data.', 429);
         }
-        break;
-    }
+        if (!response.ok || payload?.errors?.length) {
+            if (stale && response.status >= 500) return stale;
+            const message = payload?.errors?.map(error => error.message).join('; ') || `AniList request failed (${response.status}).`;
+            throw new AniListError(message, response.status, payload?.errors || null);
+        }
+        if (cacheKey && ttl) cacheSet(cacheKey, payload.data, ttl);
+        return payload.data;
+    }).finally(() => aniInflight.delete(inflightKey));
 
-    let payload;
-    try { payload = await response.json(); }
-    catch { throw new AniListError(`AniList returned an unreadable response (${response.status}).`, response.status); }
-
-    if (!response.ok || payload.errors?.length) {
-        const message = payload.errors?.map(error => error.message).join('; ') || `AniList request failed (${response.status}).`;
-        throw new AniListError(message, response.status, payload.errors || null);
-    }
-
-    if (cacheKey && ttl) cacheSet(cacheKey, payload.data, ttl);
-    return payload.data;
+    aniInflight.set(inflightKey, task);
+    return task;
 }
 
 const MEDIA_CARD_FIELDS = `
@@ -309,6 +406,11 @@ const MEDIA_CARD_FIELDS = `
 const MEDIA_DETAIL_FIELDS = `
     ${MEDIA_CARD_FIELDS}
     siteUrl source countryOfOrigin hashtag
+    trailer { id site thumbnail }
+    externalLinks { id url site type language color icon notes isDisabled }
+    recommendations(sort: RATING_DESC, perPage: 12) { nodes { rating mediaRecommendation { id idMal isAdult title { romaji english native } coverImage { medium large extraLarge } averageScore format status episodes } } }
+    staff(sort: RELEVANCE, perPage: 12) { edges { role node { id name { full native } image { large medium } primaryOccupations } } }
+    rankings { rank type format year season allTime context }
     synonyms
     nextAiringEpisode { airingAt episode timeUntilAiring }
     characters(sort: [ROLE, RELEVANCE, ID], perPage: 18) {
@@ -427,17 +529,27 @@ async function getDiscover(page = 1, perPage = PAGE_SIZE) {
 
 async function searchAnime(queryText, page = 1, perPage = PAGE_SIZE, filters = {}, signal) {
     const requestedSort = ({ popularity: 'POPULARITY_DESC', score: 'SCORE_DESC', start_date: 'START_DATE_DESC' })[filters.order];
-    // SEARCH_MATCH is only used for an unfiltered title search. Other filters use a
-    // normal media sort, avoiding AniList's illegal operator/value combinations.
-    const sort = requestedSort || ((filters.type || filters.status || filters.rating) ? 'POPULARITY_DESC' : 'SEARCH_MATCH');
+    // Keep title relevance as the default even when format/status/score filters are active.
+    // Explicit user-selected sorting still overrides relevance.
+    const sort = requestedSort || 'SEARCH_MATCH';
     return buildMediaPageRequest({
         page,
         perPage,
-        filters: { search: queryText, type: filters.type, status: filters.status, rating: filters.rating },
+        filters: {
+            search: queryText,
+            genre: filters.genre,
+            year: filters.year,
+            season: filters.season,
+            type: filters.type,
+            status: filters.status,
+            rating: filters.rating,
+            adultMode: adultContentEnabled ? filters.adultMode : 'regular',
+        },
         sort,
         cachePrefix: 'search',
         ttl: CACHE_TTL.search,
         signal,
+        priority: 'interactive',
     });
 }
 
@@ -539,14 +651,25 @@ function restoreResultsGridState(state) {
 function configureResultsHeader(target) {
     const title = document.getElementById('grid-title');
     const filters = document.getElementById('global-filters-container');
+    const discoverFilters = document.getElementById('grid-discover-filters');
     if (target === 'trending' || target === 'top') {
         filters?.classList.add('hidden');
+        discoverFilters?.classList.add('hidden');
         title.textContent = target === 'trending' ? 'Trending Now' : 'Top Rated';
+    } else if (target === 'discover') {
+        filters?.classList.add('hidden');
+        discoverFilters?.classList.remove('hidden');
+        title.textContent = `Discover · ${seasonLabel()}`;
+        syncGridDiscoverFilters();
+    } else if (target === 'search') {
+        filters?.classList.add('hidden');
+        discoverFilters?.classList.remove('hidden');
+        title.textContent = `Search: “${currentSearchQuery}”`;
+        syncGridDiscoverFilters();
     } else {
         filters?.classList.remove('hidden');
-        if (target === 'search') title.textContent = `Search: “${currentSearchQuery}”`;
-        else if (target === 'studio') title.textContent = `Studio: ${selectedStudioName}`;
-        else title.textContent = `Discover · ${seasonLabel()}`;
+        discoverFilters?.classList.add('hidden');
+        if (target === 'studio') title.textContent = `Studio: ${selectedStudioName}`;
     }
 }
 
@@ -591,13 +714,31 @@ function initPreferences() {
     languageSelect?.addEventListener('change', event => {
         titleLanguage = event.target.value;
         localStorage.setItem('anizoneTitleLanguage', titleLanguage);
-        loadDashboardRows();
-        if (currentDetailAnime && !document.getElementById('view-details')?.classList.contains('hidden')) {
-            renderAnimeDetails(currentDetailAnime);
-        }
-        if (!document.getElementById('view-history')?.classList.contains('hidden')) renderHistoryLogGrid();
-        if (currentActiveRowTarget && !document.getElementById('view-results')?.classList.contains('hidden')) fetchExpandedGridData();
+        updateVisibleTitlesForLanguage();
     });
+}
+
+
+function updateVisibleTitlesForLanguage() {
+    document.querySelectorAll('.anime-card').forEach(card => {
+        const anime = card._animeData;
+        const titleNode = card.querySelector('.anime-card-title');
+        if (!anime || !titleNode) return;
+        const title = displayTitle(anime);
+        const alt = secondaryTitle(anime);
+        titleNode.innerHTML = `${escapeHtml(title)}${alt ? `<span>${escapeHtml(alt)}</span>` : ''}`;
+        const image = card.querySelector('img');
+        if (image) image.alt = title;
+    });
+    if (heroSlides[heroSlideIndex]) renderHeroSlide(heroSlideIndex);
+    if (currentDetailAnime && !document.getElementById('view-details')?.classList.contains('hidden')) {
+        const primary = displayTitle(currentDetailAnime);
+        const alternate = secondaryTitle(currentDetailAnime);
+        const title = document.getElementById('detail-title');
+        if (title) title.innerHTML = `${escapeHtml(primary)}${alternate ? `<span class="detail-alt-title">${escapeHtml(alternate)}</span>` : ''}`;
+        renderCastProfiles(currentCastEdges, false);
+    }
+    if (!document.getElementById('view-schedule')?.classList.contains('hidden') && scheduleInitialized) initScheduleView(true);
 }
 
 function initSearchEngine() {
@@ -614,10 +755,12 @@ function initSearchEngine() {
         suggestionsDropdown?.classList.add('hidden');
         clearTimeout(timer);
         suggestionController?.abort();
-        if (query.length >= 2) timer = setTimeout(() => fetchSearchSuggestions(query), 300);
+        if (query.length >= 3) timer = setTimeout(() => fetchSearchSuggestions(query), 550);
     });
     searchInput?.addEventListener('keydown', event => {
         if (event.key !== 'Enter') return;
+        suggestionController?.abort();
+        suggestionsDropdown?.classList.add('hidden');
         const query = searchInput.value.trim();
         if (query) executeGlobalSearch(query, 1);
     });
@@ -634,13 +777,23 @@ function initSearchEngine() {
 async function fetchSearchSuggestions(queryText) {
     suggestionController?.abort();
     suggestionController = new AbortController();
+    const query = `query ($search: String!, $mediaCount: Int!, $studioCount: Int!) {
+        anime: Page(page: 1, perPage: $mediaCount) {
+            media(type: ANIME, search: $search, sort: SEARCH_MATCH${adultArgument()}) { ${MEDIA_CARD_FIELDS} }
+        }
+        studios: Page(page: 1, perPage: $studioCount) {
+            studios(search: $search) { id name isAnimationStudio }
+        }
+    }`;
     try {
-        const [mediaData, studioData] = await Promise.all([
-            searchAnime(queryText, 1, 6, {}, suggestionController.signal),
-            findStudios(queryText, 3, suggestionController.signal).catch(() => ({ Page: { studios: [] } })),
-        ]);
-        const anime = mediaData?.Page?.media || [];
-        const studios = studioData?.Page?.studios || [];
+        const data = await aniRequest(query, { search: queryText, mediaCount: 6, studioCount: 3 }, {
+            cacheKey: `suggestions:${adultContentEnabled}:${queryText.toLowerCase()}`,
+            ttl: 30 * 60 * 1000,
+            signal: suggestionController.signal,
+            priority: 'interactive',
+        });
+        const anime = data?.anime?.media || [];
+        const studios = data?.studios?.studios || [];
         if (!anime.length && !studios.length) return;
         suggestionsDropdown.innerHTML = '';
         anime.forEach(item => {
@@ -660,22 +813,48 @@ async function fetchSearchSuggestions(queryText) {
         });
         suggestionsDropdown.classList.remove('hidden');
     } catch (error) {
-        if (error.name !== 'AbortError') console.error('Suggestion error:', error);
+        if (error.name !== 'AbortError') console.warn('Suggestions paused:', error.message);
     }
+}
+
+async function getDashboardBundle() {
+    const seasonArgs = selectedDiscoverSeason ? ', season: $season' : '';
+    const yearArgs = selectedDiscoverYear ? ', seasonYear: $seasonYear' : '';
+    const genreArgs = selectedDiscoverGenre ? ', genre: $genre' : '';
+    const query = `query ($perPage: Int!${selectedDiscoverSeason ? ', $season: MediaSeason' : ''}${selectedDiscoverYear ? ', $seasonYear: Int' : ''}${selectedDiscoverGenre ? ', $genre: String' : ''}) {
+        trending: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: TRENDING_DESC${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
+        top: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: SCORE_DESC${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
+        discover: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: POPULARITY_DESC${seasonArgs}${yearArgs}${genreArgs}${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
+    }`;
+    const variables = { perPage: 20 };
+    if (selectedDiscoverSeason) variables.season = selectedDiscoverSeason;
+    if (selectedDiscoverYear) variables.seasonYear = Number(selectedDiscoverYear);
+    if (selectedDiscoverGenre) variables.genre = selectedDiscoverGenre;
+    return aniRequest(query, variables, {
+        cacheKey: `dashboard:${adultContentEnabled}:${selectedDiscoverSeason}:${selectedDiscoverYear}:${selectedDiscoverGenre}`,
+        ttl: CACHE_TTL.trending,
+        priority: 'interactive',
+    });
 }
 
 async function loadDashboardRows() {
     showLoading(true);
-    const trendPromise = getTrending(1, 20).then(data => {
-        const list = data.Page.media || [];
-        renderSliderTrack('row-trending', list);
-        setupHeroBillboard(list);
-    }).catch(error => renderRowError('row-trending', error, loadDashboardRows));
-    const topPromise = getTopRated(1, 20).then(data => renderSliderTrack('row-top', data.Page.media || []))
-        .catch(error => renderRowError('row-top', error, loadDashboardRows));
-    const discoverPromise = refreshDiscoverRow();
-    await Promise.allSettled([trendPromise, topPromise, discoverPromise]);
-    showLoading(false);
+    try {
+        const data = await getDashboardBundle();
+        dashboardPools.trending = data?.trending?.media || [];
+        dashboardPools.top = data?.top?.media || [];
+        dashboardPools.discover = data?.discover?.media || [];
+        renderSliderTrack('row-trending', dashboardPools.trending);
+        renderSliderTrack('row-top', dashboardPools.top);
+        renderSliderTrack('row-discover', dashboardPools.discover);
+        setupHeroBillboard(dashboardPools.trending);
+    } catch (error) {
+        renderRowError('row-trending', error, loadDashboardRows);
+        renderRowError('row-top', error, loadDashboardRows);
+        renderRowError('row-discover', error, loadDashboardRows);
+    } finally {
+        showLoading(false);
+    }
 }
 function renderRowError(trackId, error, retry) {
     console.error(trackId, error);
@@ -697,6 +876,7 @@ function renderSliderTrack(trackId, dataset) {
 function createAnimeCard(anime, isHistory = false) {
     const card = document.createElement('div');
     card.className = 'anime-card';
+    card._animeData = anime;
     const title = displayTitle(anime);
     const alt = secondaryTitle(anime);
     card.innerHTML = `<img src="${escapeHtml(imageUrl(anime))}" alt="${escapeHtml(title)}" loading="lazy">${anime.isAdult ? '<span class="adult-card-badge">18+</span>' : ''}<div class="anime-card-overlay"></div><div class="anime-card-title">${escapeHtml(title)}${alt ? `<span>${escapeHtml(alt)}</span>` : ''}</div>`;
@@ -762,7 +942,7 @@ function renderHeroSlide(index) {
             currentLayer?.classList.remove('active');
             heroBackgroundLayer = nextLayerIndex;
         }
-        document.getElementById('hero-title').textContent = displayTitle(anime, true);
+        document.getElementById('hero-title').textContent = displayTitle(anime);
         document.getElementById('hero-synopsis').textContent = stripHtml(anime.description) || 'No synopsis available.';
         document.querySelector('.hero-badge.top-10').textContent = `#${index + 1} Trending`;
         document.querySelector('.hero-badge.new-season').textContent = anime.seasonYear ? `${anime.season || ''} ${anime.seasonYear}`.trim() : formatStatus(anime.status);
@@ -796,6 +976,13 @@ function initDiscoverFilters() {
     if (rating) rating.value = selectedDiscoverRating;
     if (adult) adult.value = selectedDiscoverAdult;
     syncDiscoverAdultFilter();
+    const filterToggle = document.getElementById('discover-filter-toggle');
+    const filterPanel = document.getElementById('discover-filter-panel');
+    filterToggle?.addEventListener('click', () => {
+        const open = filterToggle.getAttribute('aria-expanded') === 'true';
+        filterToggle.setAttribute('aria-expanded', String(!open));
+        filterPanel?.classList.toggle('open', !open);
+    });
     [
         [genre, value => selectedDiscoverGenre = value],
         [year, value => selectedDiscoverYear = value],
@@ -810,22 +997,32 @@ function initDiscoverFilters() {
 function populateYearFilterOptions() {
     const select = document.getElementById('filter-year');
     if (!select) return;
-    let options = '';
+    let options = '<option value="">All Years</option>';
     for (let year = new Date().getFullYear() + 1; year >= 1960; year--) options += `<option value="${year}">${year}</option>`;
     select.innerHTML = options;
 }
 function syncDiscoverAdultFilter() {
-    const select = document.getElementById('discover-adult-filter');
-    if (!select) return;
-    select.classList.toggle('hidden', !adultContentEnabled);
-    select.disabled = !adultContentEnabled;
-    select.value = selectedDiscoverAdult;
+    const selects = [
+        document.getElementById('discover-adult-filter'),
+        document.getElementById('grid-discover-adult'),
+    ].filter(Boolean);
+    if (!adultContentEnabled) {
+        selectedDiscoverAdult = 'regular';
+        localStorage.setItem('anizoneDiscoverAdultMode', selectedDiscoverAdult);
+    }
+    selects.forEach(select => {
+        select.disabled = !adultContentEnabled;
+        select.value = selectedDiscoverAdult;
+        select.classList.toggle('hidden', !adultContentEnabled);
+        select.closest('.az-select')?.classList.toggle('hidden', !adultContentEnabled);
+        select._azRebuild?.();
+    });
 }
 
 function resetDiscoverFilters() {
     selectedDiscoverGenre = '';
     selectedDiscoverYear = String(new Date().getFullYear());
-    selectedDiscoverSeason = getCurrentSeason();
+    selectedDiscoverSeason = '';
     selectedDiscoverType = '';
     selectedDiscoverStatus = '';
     selectedDiscoverRating = '';
@@ -861,6 +1058,85 @@ function initSliders() {
         container.querySelector('.right-arrow')?.addEventListener('click', () => track?.scrollBy({ left: 500, behavior: 'smooth' }));
     });
 }
+function syncGridDiscoverFilters() {
+    const sourceGenre = document.getElementById('home-filter-genre');
+    const sourceYear = document.getElementById('filter-year');
+    const gridYearValue = currentActiveRowTarget === 'search' ? selectedSearchYear : selectedDiscoverYear;
+    const pairs = [
+        ['grid-discover-genre', sourceGenre, selectedDiscoverGenre],
+        ['grid-discover-year', sourceYear, gridYearValue],
+    ];
+    pairs.forEach(([id, source, value]) => {
+        const target = document.getElementById(id);
+        if (!target || !source) return;
+        if (target.options.length !== source.options.length) target.innerHTML = source.innerHTML;
+        target.value = value;
+        target._azRebuild?.();
+    });
+    const values = {
+        'grid-discover-season': selectedDiscoverSeason,
+        'grid-discover-type': selectedDiscoverType,
+        'grid-discover-status': selectedDiscoverStatus,
+        'grid-discover-rating': selectedDiscoverRating,
+        'grid-discover-adult': selectedDiscoverAdult,
+        'grid-search-order': selectedSearchOrder,
+    };
+    Object.entries(values).forEach(([id, value]) => {
+        const select = document.getElementById(id);
+        if (select) { select.value = value; select._azRebuild?.(); }
+    });
+    syncDiscoverAdultFilter();
+    const searchOrder = document.getElementById('grid-search-order');
+    const searchOrderWrap = searchOrder?.closest('.az-select') || searchOrder;
+    searchOrderWrap?.classList.toggle('hidden', currentActiveRowTarget !== 'search');
+}
+
+function initGridDiscoverFilters() {
+    const toggle = document.getElementById('grid-discover-filter-toggle');
+    const panel = document.getElementById('grid-discover-filter-panel');
+    toggle?.addEventListener('click', () => {
+        const open = toggle.getAttribute('aria-expanded') === 'true';
+        toggle.setAttribute('aria-expanded', String(!open));
+        panel?.classList.toggle('open', !open);
+    });
+    const bindings = {
+        'grid-discover-genre': value => selectedDiscoverGenre = value,
+        'grid-discover-year': value => {
+            if (currentActiveRowTarget === 'search') selectedSearchYear = value;
+            else selectedDiscoverYear = value;
+        },
+        'grid-discover-season': value => selectedDiscoverSeason = value,
+        'grid-discover-type': value => selectedDiscoverType = value,
+        'grid-discover-status': value => selectedDiscoverStatus = value,
+        'grid-discover-rating': value => selectedDiscoverRating = value,
+        'grid-discover-adult': value => { selectedDiscoverAdult = value; localStorage.setItem('anizoneDiscoverAdultMode', value); },
+        'grid-search-order': value => selectedSearchOrder = value,
+    };
+    Object.entries(bindings).forEach(([id, setter]) => document.getElementById(id)?.addEventListener('change', event => {
+        setter(event.target.value);
+        currentPage = 1;
+        syncGridDiscoverFilters();
+        fetchExpandedGridData();
+    }));
+    document.getElementById('grid-reset-discover-filters')?.addEventListener('click', () => {
+        if (currentActiveRowTarget === 'search') {
+            selectedDiscoverGenre = '';
+            selectedSearchYear = '';
+            selectedDiscoverSeason = '';
+            selectedDiscoverType = '';
+            selectedDiscoverStatus = '';
+            selectedDiscoverRating = '';
+            selectedDiscoverAdult = adultContentEnabled ? 'both' : 'regular';
+            selectedSearchOrder = 'default';
+        } else {
+            resetDiscoverFilters();
+        }
+        syncGridDiscoverFilters();
+        currentPage = 1;
+        fetchExpandedGridData();
+    });
+}
+
 function initGlobalFilterListeners() {
     ['filter-type', 'filter-status', 'filter-rating', 'filter-order'].forEach(id => document.getElementById(id)?.addEventListener('change', () => {
         if (currentActiveRowTarget && !document.getElementById('view-results')?.classList.contains('hidden')) {
@@ -878,8 +1154,13 @@ function expandRowToGrid(target) {
     fetchExpandedGridData();
 }
 function executeGlobalSearch(query, page = 1) {
+    const startingNewSearch = currentActiveRowTarget !== 'search' || currentSearchQuery !== query.trim();
     currentSearchQuery = query.trim();
     currentActiveRowTarget = 'search';
+    if (startingNewSearch) {
+        selectedSearchYear = '';
+        selectedSearchOrder = 'default';
+    }
     currentPage = page;
     suggestionsDropdown?.classList.add('hidden');
     configureResultsHeader('search');
@@ -901,7 +1182,16 @@ async function fetchExpandedGridData() {
     if (!grid || !currentActiveRowTarget) return;
     showLoading(true);
     grid.innerHTML = '<div class="spinner"></div>';
-    const filters = {
+    const filters = currentActiveRowTarget === 'search' ? {
+        genre: selectedDiscoverGenre,
+        year: selectedSearchYear,
+        season: selectedDiscoverSeason,
+        type: selectedDiscoverType,
+        status: selectedDiscoverStatus,
+        rating: selectedDiscoverRating,
+        adultMode: adultContentEnabled ? selectedDiscoverAdult : 'regular',
+        order: selectedSearchOrder,
+    } : {
         type: document.getElementById('filter-type')?.value || '',
         status: document.getElementById('filter-status')?.value || '',
         rating: document.getElementById('filter-rating')?.value || '',
@@ -931,7 +1221,8 @@ function renderResultsPage(grid, items, pageInfo) {
     grid.innerHTML = '';
     if (!items.length) grid.innerHTML = '<div class="empty-state">No matching anime found.</div>';
     else items.forEach(item => grid.appendChild(createAnimeCard(item)));
-    document.getElementById('results-count').textContent = `${Number(pageInfo?.total || items.length).toLocaleString()} Titles`;
+    const total = Number(pageInfo?.total || items.length);
+    document.getElementById('results-count').textContent = total >= 5000 ? '5,000+ Titles' : `${total.toLocaleString()} Titles`;
     updatePaginationControls(pageInfo);
 }
 function updatePaginationControls(pageInfo) {
@@ -941,7 +1232,7 @@ function updatePaginationControls(pageInfo) {
     if (!previous || !next || !indicator) return;
     previous.disabled = !pageInfo || currentPage <= 1;
     next.disabled = !pageInfo?.hasNextPage;
-    indicator.textContent = pageInfo ? `Page ${currentPage} of ${pageInfo.lastPage || currentPage}` : `Page ${currentPage}`;
+    indicator.textContent = `Page ${currentPage}`;
     previous.onclick = () => { if (currentPage > 1) { currentPage--; updateRoutePage(); fetchExpandedGridData(); window.scrollTo({ top: 0 }); } };
     next.onclick = () => { if (pageInfo?.hasNextPage) { currentPage++; updateRoutePage(); fetchExpandedGridData(); window.scrollTo({ top: 0 }); } };
 }
@@ -964,7 +1255,7 @@ async function viewSingleAnime(animeId, pushState = true) {
         renderAnimeDetails(anime);
         renderCastProfiles(anime.characters?.edges || []);
         appendAnimeToClickHistoryLog(anime);
-        fetchFranchiseTimeline(anime);
+        if(getDetailPrefs().timeline) renderDetailSection('timeline',anime); else document.getElementById('chrono-timeline').innerHTML='';
     } catch (error) {
         console.error('Detail error:', error);
         document.getElementById('detail-title').textContent = error.message || 'Unable to load anime details.';
@@ -1008,7 +1299,8 @@ async function loadMalScoreIntoDetails(anime) {
         badge.textContent = score != null ? `★ MAL ${Number(score).toFixed(2)} / 10` : 'MAL N/A';
     } catch (error) {
         if (currentDetailAnime?.id !== anime.id) return;
-        badge.textContent = 'MAL unavailable';
+        badge.textContent = 'MAL —';
+        badge.title = 'MAL score is temporarily unavailable.';
         console.warn('MAL score lookup failed:', error);
     }
 }
@@ -1042,16 +1334,26 @@ function updateCastLanguageControls() {
     });
 }
 function initCastLanguageToggle() {
-    document.querySelectorAll('[data-cast-language]').forEach(button => {
-        button.addEventListener('click', () => {
-            castLanguage = button.dataset.castLanguage;
-            localStorage.setItem('anizoneCastLanguage', castLanguage);
-            updateCastLanguageControls();
-            renderCastProfiles(currentCastEdges, false);
-        });
+    const toggle = document.querySelector('.cast-language-toggle');
+    if (!toggle || toggle.dataset.bound === 'true') { updateCastLanguageControls(); return; }
+    toggle.dataset.bound = 'true';
+    toggle.setAttribute('role', 'switch');
+    toggle.setAttribute('tabindex', '0');
+    const switchLanguage = () => {
+        castLanguage = castLanguage === 'JAPANESE' ? 'ENGLISH' : 'JAPANESE';
+        localStorage.setItem('anizoneCastLanguage', castLanguage);
+        toggle.setAttribute('aria-checked', String(castLanguage === 'ENGLISH'));
+        updateCastLanguageControls();
+        renderCastProfiles(currentCastEdges, false);
+    };
+    toggle.addEventListener('click', event => { event.preventDefault(); switchLanguage(); });
+    toggle.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); switchLanguage(); }
     });
+    toggle.setAttribute('aria-checked', String(castLanguage === 'ENGLISH'));
     updateCastLanguageControls();
 }
+
 function renderCastProfiles(edges, remember = true) {
     if (remember) currentCastEdges = edges || [];
     const container = document.getElementById('characters-list');
@@ -1068,6 +1370,7 @@ function renderCastProfiles(edges, remember = true) {
         const card = document.createElement('div');
         card.className = 'cast-card';
         card.innerHTML = `${character.image?.large ? `<img class="cast-avatar" src="${escapeHtml(character.image.large)}" alt="${escapeHtml(character.name.full)}" loading="lazy">` : '<div class="cast-avatar-placeholder">👤</div>'}<div class="cast-info"><span class="cast-char-name">${escapeHtml(character.name.full)}</span><span class="cast-va-name${actor ? '' : ' no-va'}">${actor ? `${escapeHtml(actor.name.full)} (${languageLabel})` : `No ${languageLabel} voice actor data`}</span></div>`;
+        card.addEventListener('click', () => window.open(`https://anilist.co/character/${character.id}`, '_blank', 'noopener'));
         if (actor) card.querySelector('.cast-va-name').addEventListener('click', event => { event.stopPropagation(); openVoiceActorPortfolioPanel(actor.id, actor.name.full); });
         container.appendChild(card);
     });
@@ -1113,15 +1416,15 @@ async function fetchFranchiseTimeline(rootAnime) {
     const queue = [{ anime: rootAnime, depth: 0 }];
 
     try {
-        while (queue.length && seen.size < 60) {
+        while (queue.length && seen.size < 40) {
             const current = queue.shift();
             const candidates = (current.anime.relations?.edges || []).filter(edge => {
                 const node = edge.node;
                 return node?.type === 'ANIME'
                     && MAIN_CONTINUITY_RELATIONS.has(edge.relationType)
                     && !seen.has(node.id)
-                    && isMainFranchiseMatch(rootAnime, node)
-                    && (adultContentEnabled || !node.isAdult);
+                    && (adultContentEnabled || !node.isAdult)
+                    && isMainFranchiseMatch(rootAnime, node);
             });
 
             if (!candidates.length) continue;
@@ -1188,6 +1491,33 @@ function renderTimelineLayout(nodes, activeId) {
     });
 }
 
+async function openStaffPortfolioPanel(personId, personName) {
+    const modal = document.getElementById('va-modal');
+    const name = document.getElementById('va-modal-name');
+    const roles = document.getElementById('va-roles-container');
+    modal.classList.remove('hidden');
+    name.textContent = personName;
+    roles.innerHTML = '<div class="spinner"></div>';
+    document.getElementById('close-va-modal').onclick = () => modal.classList.add('hidden');
+    modal.onclick = event => { if (event.target === modal) modal.classList.add('hidden'); };
+    try {
+        const query = `query ($id: Int!) { Staff(id: $id) { id name { full } primaryOccupations staffMedia(page: 1, perPage: 30, type: ANIME, sort: [POPULARITY_DESC]) { nodes { id isAdult popularity title { romaji english native } coverImage { medium } } } } }`;
+        const data = await aniRequest(query, { id: Number(personId) }, { cacheKey: `staff-media:${personId}`, ttl: CACHE_TTL.details });
+        const anime = (data.Staff?.staffMedia?.nodes || []).filter(item => adultContentEnabled || !item.isAdult);
+        roles.innerHTML = '';
+        if (!anime.length) { roles.innerHTML = '<div class="empty-state">No anime staff credits found.</div>'; return; }
+        anime.forEach(item => {
+            const card = document.createElement('div');
+            card.className = 'va-role-card';
+            card.innerHTML = `<span class="va-role-anime">${escapeHtml(displayTitle(item))}</span><span class="va-role-char">Staff credit</span>`;
+            card.addEventListener('click', () => { modal.classList.add('hidden'); viewSingleAnime(item.id); });
+            roles.appendChild(card);
+        });
+    } catch (error) {
+        roles.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Failed to load staff credits.')}</div>`;
+    }
+}
+
 async function openVoiceActorPortfolioPanel(personId, personName) {
     const modal = document.getElementById('va-modal');
     const name = document.getElementById('va-modal-name');
@@ -1218,45 +1548,30 @@ async function openVoiceActorPortfolioPanel(personId, personName) {
 }
 
 async function triggerRandomShuffle() {
+    const localPool = [...dashboardPools.trending, ...dashboardPools.top, ...dashboardPools.discover]
+        .filter((anime, index, list) => anime?.id && (adultContentEnabled || !anime.isAdult) && list.findIndex(item => item.id === anime.id) === index);
+    if (localPool.length) {
+        const selected = localPool[Math.floor(Math.random() * localPool.length)];
+        viewSingleAnime(selected.id);
+        return;
+    }
     showLoading(true);
     try {
-        // Jikan supplies a true random MAL entry. AniList remains the source for
-        // the detail page by resolving the returned MAL ID to an AniList ID.
-        let selected = null;
-        let lastError = null;
-        for (let attempt = 0; attempt < 5; attempt++) {
-            try {
-                const payload = await jikanRequest('/random/anime', { retries: 0 });
-                const malId = payload?.data?.mal_id;
-                if (!malId) throw new Error('Jikan returned no MAL ID.');
-                const mapped = await getAnimeByMalId(malId);
-                const anime = mapped?.Media;
-                if (!anime?.id) throw new Error('This random MAL title is not available on AniList.');
-                if (!adultContentEnabled && anime.isAdult) continue;
-                selected = anime;
-                break;
-            } catch (error) {
-                lastError = error;
-                await delay(350);
-            }
-        }
-
-        if (!selected) {
-            // Reliable fallback: choose from a broad AniList popularity pool.
-            const page = Math.floor(Math.random() * 200) + 1;
-            const query = mediaPageQuery('', `, sort: POPULARITY_DESC${adultArgument()}`);
-            const data = await aniRequest(query, { page, perPage: 25 });
-            const pool = data.Page.media || [];
-            if (!pool.length) throw lastError || new Error('No random title found.');
-            selected = pool[Math.floor(Math.random() * pool.length)];
-        }
-
-        await viewSingleAnime(selected.id);
+        const page = Math.floor(Math.random() * 40) + 1;
+        const query = mediaPageQuery('', `, sort: POPULARITY_DESC${adultArgument()}`);
+        const data = await aniRequest(query, { page, perPage: 25 }, {
+            cacheKey: `surprise:${adultContentEnabled}:${page}`,
+            ttl: CACHE_TTL.discover,
+            priority: 'interactive',
+        });
+        const pool = data.Page.media || [];
+        if (!pool.length) throw new Error('No random title found.');
+        viewSingleAnime(pool[Math.floor(Math.random() * pool.length)].id);
     } catch (error) {
-        console.error('Surprise Me failed:', error);
-        alert(error.message || 'Could not select a random anime.');
+        siteAlert(error.message || 'Unable to choose a surprise anime right now.');
     } finally { showLoading(false); }
 }
+
 function appendAnimeToClickHistoryLog(anime) {
     const compact = compactHistoryItem({ ...anime, viewedAt: Date.now() });
     clickHistory = clickHistory.filter(item => item.id !== compact.id);
@@ -1269,12 +1584,15 @@ function removeAnimeFromHistoryLog(animeId) {
     persistHistory();
     renderHistoryLogGrid();
 }
-
 function renderHistoryLogGrid() {
     const grid = document.getElementById('click-history-grid');
+    if (!grid) return;
     const visible = clickHistory.filter(item => adultContentEnabled || !item.isAdult);
     grid.innerHTML = '';
-    if (!visible.length) { grid.innerHTML = '<div class="empty-state">Your list is empty.</div>'; return; }
+    if (!visible.length) {
+        grid.innerHTML = '<div class="empty-state">Your history is empty.</div>';
+        return;
+    }
     visible.forEach(item => grid.appendChild(createAnimeCard(item, true)));
 }
 
@@ -1358,8 +1676,8 @@ function initApp() {
     initHeroControls();
     initCastLanguageToggle();
     persistHistory();
-    document.getElementById('clear-click-history')?.addEventListener('click', () => {
-        if (confirm('Clear your watch history?')) {
+    document.getElementById('clear-click-history')?.addEventListener('click', async () => {
+        if (await siteConfirm('Clear your watch history?', { title: 'Clear history', confirmText: 'Clear' })) {
             clickHistory = [];
             persistHistory();
             renderHistoryLogGrid();
@@ -1373,3 +1691,425 @@ function initApp() {
 }
 
 document.addEventListener('DOMContentLoaded', initApp);
+
+/* ==========================================
+   CONNECTED EXPERIENCE: MAL + ANILIST + JIKAN
+   ========================================== */
+const ANIZONE_CONFIG = Object.freeze({});
+
+// Shared in-site dialog helpers. These replace blocking browser popups.
+function siteDialog(message, { title = 'AniZone', confirmText = 'OK', cancelText = '', danger = false } = {}) {
+    const overlay = document.getElementById('site-dialog');
+    const titleEl = document.getElementById('site-dialog-title');
+    const messageEl = document.getElementById('site-dialog-message');
+    const confirm = document.getElementById('site-dialog-confirm');
+    const cancel = document.getElementById('site-dialog-cancel');
+    const close = document.getElementById('site-dialog-close');
+    if (!overlay || !titleEl || !messageEl || !confirm || !cancel || !close) {
+        return Promise.resolve(window.confirm(String(message)));
+    }
+    titleEl.textContent = title;
+    messageEl.textContent = String(message);
+    confirm.textContent = confirmText;
+    confirm.classList.toggle('btn-danger', Boolean(danger));
+    confirm.classList.toggle('btn-primary', !danger);
+    cancel.textContent = cancelText || 'Cancel';
+    cancel.classList.toggle('hidden', !cancelText);
+    overlay.classList.remove('hidden');
+    return new Promise(resolve => {
+        const finish = value => {
+            overlay.classList.add('hidden');
+            confirm.onclick = null; cancel.onclick = null; close.onclick = null; overlay.onclick = null;
+            resolve(value);
+        };
+        confirm.onclick = () => finish(true);
+        cancel.onclick = () => finish(false);
+        close.onclick = () => finish(false);
+        overlay.onclick = event => { if (event.target === overlay) finish(false); };
+        requestAnimationFrame(() => confirm.focus());
+    });
+}
+function siteAlert(message, options = {}) {
+    return siteDialog(message, { title: options.title || 'AniZone', confirmText: options.confirmText || 'OK' });
+}
+function siteConfirm(message, options = {}) {
+    return siteDialog(message, {
+        title: options.title || 'Confirm',
+        confirmText: options.confirmText || 'Confirm',
+        cancelText: options.cancelText || 'Cancel',
+        danger: options.danger !== false,
+    });
+}
+
+// Local visual themes do not require MAL or AniList login.
+const THEME_AVATAR_DATA = Object.freeze({
+    default: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAFcklEQVR42u3dTWviUBSA4ShdxLoIiN0I/v8fJnYjCC6U7OyiyHwgMxMnmnvueZ7dMGUYkntfz9U2ne0X62sDkNDcJQAEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAgfTeXIIflsdd07Xt3b/7fP9wgaje5nJItf5n+8X66oYPI4bYA3XsgbQBfOSmCyEZTjuZ9kC6AI5144WQzC/+taz/ebYbP3b8nrGgIEr8bv/m8rgTwGw3XgSxB751bRsygnM3XgSxB7JG0PcBiiDW5KgRFEBBgiJMMZFF2nNVB3CqGyG6lGKqiSzKUdgROPkCwACQ+ShcbQCnDlC090Igo2oDKECQdwJ1BAbxQQAtQkAAAeoPoMkLMAECCCBAkgB6Ph9gAgQQQJMoIIDgxZf6A2gBgD1oAnTzSerU9y5C5gBaAGR2Xm0NAJkDONUCMP1hCDABOopCwiEg0p5L8R7gK18FBZfMQ0C09Z8igOfV9iURFD8yRzDicTvNp8DPjqD4kTmCp76f9EOXR832i/U120IY+3FZ4of1H1PKAI61CISPzHsg6tQngD9ZHneDf4GS8JE5hDWETwAHLAbBwx6ocw8IIJCWnwUGBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQSYyptLAPyvzeXwy58/3z9C/L9n+8X66vYBQy2Pu6Zr2z9+TekhdAQGBodvczn8NX73JkMBBKoPX5QIeg+Qh9xb1FHe92H8o25U3gNk9FdzIcxzr4cocV2YABl9Q9y+TgiFr3QCyNM2xeZyaE5935xXWxdQ+ASQfLq2bTohFD0BJPMmuYXQ0Vj4BBCbTwhTRa/Uey2ATL4hHY9NegJIWo7HdUev5Hvq+wApdlOJYexJL8JkbwIkxKZ2TI51tPU0GGw6GyxN8KLeFxMgg440pfxM6O9BqG1CjPbhRdQXJBMgVW/O0jdm9E9po0/iAshDanhCyCs2b43fhlLTtC2A2OCkmPYEECFE+AQQISTLMVcAebmanyJs2hNAMBWa9gQQhNC0J4AghqIngPDvvFcoegIIYjgaD44QQByTTXkIIIIoeAggguhIiwAiiiY7BJBESvqAxUQngFDNJGlqE0CAcOYuASCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCAggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIICKBLAAgggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAICCCCAAAIIkMAXVHSdYTxR8wgAAAAASUVORK5CYII=',
+    sakura: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAFi0lEQVR42u3dsW7aUBiGYYMyePMNwpiRkZsgY0ZGrtAbm7u0aislkUwc7P98z7NVlSrFPuflPybQ3XS4TB1AoL1LAAgggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAICCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAAC8V5cgr/G66kb+v7jvzy+uUC073aOWv+76XCZ3PCZxBB7QADjbroQknDaCdoDcQFc7MYLIckv/o2s/33ajV88fj+xoKBK/H7/m+P1JIBxN14EsQe6ruu6oe9LRnDvxosg9kBqBP0eoAhiTS4aQQEUJNiEVSayQnuu7QCudSNEl41YayKrchR2BA5fABgAko/CzQZw7QBVexYCiZoNoABB7gTqCAzigwBahIAAAgQE0OQFmAABBBAgJIC+nw8wAQIIoEkUEEDw4kv7AbQAwB40Abr5ZBrvdxchOYAWAMmG13cDQHIAV1sApj8MAQLoKAqBQ0ChPRfxDPCpr4KCS/IQUGz9RwRweH1/TgTFj+AIVjxux7wL/OMRFD+CIzje7+u+6fKg3XS4THELYemvyxI/rP+SMgO41CIQPoL3QNWpTwD/vYnX0/z/QEn4CA5hC+ETwDmLQfCwB5r8UQUQiOWzwIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCAggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAGt5cQmAb7ud///z8U0AgXaN11M39P3XQdx4CB2Bgdnh627nz+P31WQogEDz4SsSQUdgHvPRoi7y3IfHjrpDgz/bbjpcJreYRV/NhTDnXs+xwXVhAmT5DVHkATj1jqwCSJ1NcTt34/3eDa/vrp/wCSB5hr4XQtETQLI3yZ8QOhoLnwBi8wlhVvQ2eq8FkNU3pOOxSU8AieV43Hj0NnxP/R4g291UYlh60qsw2ZsAKbGpHZOLHW2PbyU+OWICpOamS5sOqzzLK3ZfTIDMO9LM/SD8k4LQ3IRY7c2Loi9IJkDa3pxb35jV36UtPokLII9Ng199GabN207gPjsJNDJtCyA2OBHT3kc8A2SZTSGEwieACKEQOuY6ApO+gVp4RmjaE0D4NlOhaU8AEUIhNO1ti2eArLPhxFD0BJD0jehZoeg5AoMYLncdfXGEANIAx2RTniMwNrUgCp4AYtNHBtGR1hEYMo7NJjsTICwdkC29wWKiMwFCO5Okqc0ECAmTJG3ZuwSAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgggIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAgAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIICCALgEggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIICCCAAAIIIECAX/EOWdBfmuKNAAAAAElFTkSuQmCC',
+    shonen: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAFd0lEQVR42u3dMXLaQBSA4YVxoU5HgJIzQcm5KLkTJVdQp05u7EkywyQRFmjfvu/rMvFkEmn3562wyWY67qYCkNDWJQAEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAgfQ+XIJfhsut9F33+DdPexeI9l3vqdb/ZjruJjd8JjHEHhDAdDddCMlw2km0B9IFcLEbL4RkfvFvZP1vs934xeP3igUFUeL39WcOl5sAprvxIog9UEoppe+6kBHcuvEiiD2QNYK+D1AEsSYXjaAAChJUYZWJLNCeazuAa90I0aUSa01kUY7CjsDJFwAGgMxH4WYDuHaAoj0LgYyaDaAAQd4J1BEYxAcBtAgBAQRIEECTF2ACBBBAgCQB9Pl8gAkQQABNooAAghdf2g+gBQD2oAnQzSenYRxdhMwBtADIrD8fDACZA7jaAjD9YQgQQEdRSDgEBNpzKZ4BvvVVUHDJPAQEW/8pAtifD++JoPiROIIRj9tp3gV+eQTFj8QRHMZx3TddnrSZjrsp3UJY+uOyxA/rP6ScAVxqEQgfifdA1KlPAH+/iZfb/P9ASfhIHMIWwieAcxaD4GEPNPlPFUAgLT8LDAgggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAICCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIsJYPlwD4sev9z1+f9iH+2pvpuJvcPWCu4XIrfdf9/YsqD6EjMDA7fOV6/3f8Hk2GAgg0H74gEfQMkOc8WtRBnvvw3FG3b/Df5hkgy7+aC2Geez1HhevCBMjyG+L764RQ+CongLxuU1zvZRjH0p8Prp/wCSD59F0nhKIngOTeJN8hdDQWPgHE5hPCXNGr9F4LIKtvSMdjk54AkpbjcePRq/ie+j5A6t1UYhh60osw2ZsACbGpHZODHW1P+xA/OWICJOamyzYdRnmWF+y+mACZd6SZ+4PwbwpCcxNitDcvgr4gmQBpe3PWvjGjv0sbfBIXQJ6bBv/nwzBt3ia/DaWlaVsAscFJMe0JIEKI8AkgQkiWY64A8v4N1MIzQtOeAIKp0LQngCCEpj0BBDEUPQGEnx+/PCsUPQEEMVzsOvrgCAHEMdmUhwAiiIKHACKIjrQIIKJoskMAyaOmN1hMdAII7UySpjYBBIhm6xIAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAgAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggIAAugSAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgggIIAAAggggAAJfAKZUGayp+4zPwAAAABJRU5ErkJggg==',
+    cyber: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAFlElEQVR42u3dMW7iQBSAYYMi4o6OC1ByCkouTEouQUouQEdnKlJE0bIRQWt2gv3mfV+3WmkLe+bnjUm8k9l2f2kAEpq6BIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCAggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIICAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgggkN6LS/DHcb1s5m178+9e395dIKp33qxSrf/JbLu/uOH9iCH2QB17IG0AH7npQkiG006mPZAugKVuvBCS+cO/lvU/zXbjS8fvNxYURInf1795XC8FMNuNF0HsgU/ztg0ZwakbL4LYA1kj6OcARRBrsmgEBVCQYBSGmMgi7bmqAzjUjRBdxmKoiSzKUdgROPkCwACQ+ShcbQCHDlC0ZyGQUbUBFCDIO4E6AoP4IIAWISCAAPUH0OQFmAABBBAgSQC9nw8wAQIIoEkUEEDw4Uv9AbQAwB40Abr5JHXqOhchcwAtADJb7A4GgMwBHGoBmP4wBJgAHUUh4RAQac+leAb4zE9BwSXzEBBt/acI4GJ3eEoExY/MEYx43E7zLfBvR1D8yBzBU9cN+qXLoyaz7f6SbSGUfl2W+GH9x5QygKUWgfCReQ9EnfoE8Mpxvez9HygJH5lDWEP4BLDHYhA87IE694AAAmn5XWBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQIChvLgEwP86b1Z//fn17V0AgXod18tm3rZ3gzj2EDoCA73Dd96sfozfvclQAIHqwxclgo7APOTWoo7y3IdyR93oJrPt/uIWU/LTXAjz3Os+xrguTIAU3xBRHoAT78gqgITZFOfNqjl1XbPYHVxA4RNA8pm3rRCKngCSe5N8hdDRWPgEEJtPCFNFb6z3WgAZfEM6Hpv0BJC0HI/rjt6Y76mfA2S0m0oMY096ESZ7EyAhNrVjcqyjbZQPLxMgITddtukwyrO8aPfFBEivI81Yfif0exBqmxCjfXkR9QPJBEjVm3PsGzP6t7TRJ3EB5CE1vCHkGZu3xh9DqWnaFkBscFJMe7d4BkiRTSGEwieACKEQOuYKINlDWPNbhE17Agh3XU8PpkLTngDieCyEpj0BxIYTQ9ETQGxEzwpFTwDJ6/rZkxiW4cURAkjwGDomm/IEEJtaEAVPACFvEB1pBRD+aQrydhUEEFH8ZkxfsJjoBBCeqm9w+kySpjYBhBSTJHWZugSAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgggIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAgAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIICCALgEggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIICCCAAAIIIEACH4JWlGJuCfqGAAAAAElFTkSuQmCC',
+    ghibli: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAYAAADNkKWqAAAFaklEQVR42u3du24aURCA4QW52I43wRIukXgwJFxQ8GBIlBQ8Ct12pIisJFZuixd2Z+b7uihWFO2e8zOHm2fL3erWABQ0dwkAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQKC8F5fgh+P21Cza9rd/9/r+5gKR3mV/LrX+Z8vd6uaG9yOG2AM59kDZAN5z04WQCqedSnugXACHuvFCSOUH/yzrv1QAh77xIog98N2165rNYR3ueszd+Bj/Pkx5jS7atjluTwJYMX4iiD0QM4LeByiCWJODRlAABQkmYYyJLNKeSx3AsW6E6DIVY01kUY7CjsDFFwAGgMpH4bQBHDtA0Z4LgYrSBlCAoO4E6ggM4oMAWoSAAALkD6DJCzABAgggQJEA+moqwAQIIIAmUUAAwYMv+QNoAYA9aAJ08ynq2nUuQuUAWgBUNuYvKYoyAMwtANMfhgAToKMoGAKK7bkSzwE+81FQcKk8BERb/yUCuDmsnxJB8aNyBCMet8u8CvzoCIoflSN47bpRX3S512y5W92qLYShvy5L/LD+YyoZwKEWgfBReQ9EnfoE8CfH7an3L1ASPiqHMEP4BLDHYhA87IGce0AAgbJ8FhgQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEGAsLy4B8FWX/fmXP7++v4X4f8+Wu9XN7QP6Om5PzaJt//ozUw+hAAKDhy9KBAUQeEj4IkTQc4Dc5fNzPhGOOzw/fFNnAuTL4RPCuvc6+hRoAmTwDfHxc0IofFMngDxsU1z25+badc3msHYBhU8AqWfRtkIoegJI7U3yEUJHY+ETQGw+ISwVPW+DgT9sSMdjk54AUpbjce7o+SQINlWyjeP+/FuEyd4ESIhN7Zgc62jr22Cw6WywMsGLel9MgPQ60kzlM6Gfg5BtQoz24kXUByQTIKk359Q3ZvRXaaNP4gLIXTJ8Q8gzNm/Gt6FkmrYFEBucEtOeACKECJ8AIoRUOeYKIE+X+VuETXsCCKZC054AghCa9gQQxFD0BBD+n+cKRU8AQQwH44sjBBDHZFMeAoggCh4CiCA60iKAiKLJDgGkkCm9wGKiE0BIM0ma2gQQIJy5SwAIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIICCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAgLoEgACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIICAAAIIIIAAAhTwDT1mmRwCLTq4AAAAAElFTkSuQmCC',
+});
+
+function initThemes() {
+    const host = document.getElementById('theme-options');
+    const menuButton = document.getElementById('theme-menu-btn');
+    const menuPanel = document.getElementById('theme-menu-panel');
+    const avatar = document.getElementById('theme-avatar-image');
+    if (!host || !menuButton || !menuPanel || !avatar) return;
+
+    const themes = [
+        { id: 'default', label: 'AniZone', avatar: THEME_AVATAR_DATA.default },
+        { id: 'sakura', label: 'Sakura', avatar: THEME_AVATAR_DATA.sakura },
+        { id: 'shonen', label: 'Shōnen', avatar: THEME_AVATAR_DATA.shonen },
+        { id: 'cyber', label: 'Cyberpunk', avatar: THEME_AVATAR_DATA.cyber },
+        { id: 'ghibli', label: 'Forest Spirit', avatar: THEME_AVATAR_DATA.ghibli },
+    ];
+
+    const closeMenu = () => {
+        menuPanel.classList.add('hidden');
+        menuButton.setAttribute('aria-expanded', 'false');
+        document.getElementById('theme-menu-wrap')?.classList.remove('open');
+    };
+
+    const apply = value => {
+        const selected = themes.find(theme => theme.id === value) || themes[0];
+        if (selected.id === 'default') document.documentElement.removeAttribute('data-theme');
+        else document.documentElement.setAttribute('data-theme', selected.id);
+        localStorage.setItem(THEME_KEY, selected.id);
+        avatar.src = selected.avatar;
+        avatar.alt = `${selected.label} theme`;
+        host.querySelectorAll('.theme-option').forEach(button => button.classList.toggle('active', button.dataset.theme === selected.id));
+    };
+
+    host.innerHTML = '';
+    themes.forEach(theme => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'theme-option';
+        button.dataset.theme = theme.id;
+        button.setAttribute('role', 'menuitem');
+        button.innerHTML = `<span class="theme-swatch" style="--theme-swatch:${theme.color}"></span><span>${theme.label}</span>`;
+        button.addEventListener('click', event => {
+            event.stopPropagation();
+            apply(theme.id);
+            closeMenu();
+        });
+        host.appendChild(button);
+    });
+
+    menuButton.addEventListener('click', event => {
+        event.stopPropagation();
+        const opening = menuPanel.classList.contains('hidden');
+        menuPanel.classList.toggle('hidden', !opening);
+        menuButton.setAttribute('aria-expanded', String(opening));
+        document.getElementById('theme-menu-wrap')?.classList.toggle('open', opening);
+    });
+    document.addEventListener('click', event => {
+        if (!document.getElementById('theme-menu-wrap')?.contains(event.target)) closeMenu();
+    });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') closeMenu(); });
+
+    apply(localStorage.getItem(THEME_KEY) || 'default');
+}
+
+const THEME_KEY = 'anizone:theme:v1';
+let countdownTimer = null;
+function loadJson(key, fallback) { try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); } catch { return fallback; } }
+function saveJson(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
+function hasConfigured(value) { return Boolean(value && !String(value).startsWith('YOUR_')); }
+const DETAIL_PREFS_KEY='anizone:detail-prefs:v1';
+const DEFAULT_DETAIL_PREFS={countdown:true,timeline:true,trailer:true,themes:true,manga:true,staff:true,recommendations:true};
+let detailSectionState={animeId:null,loaded:new Set()};
+function getDetailPrefs(){return {...DEFAULT_DETAIL_PREFS,...loadJson(DETAIL_PREFS_KEY,{})};}
+function applyDetailPreferences(){
+    const prefs=getDetailPrefs();
+    document.querySelectorAll('[data-detail-section]').forEach(section=>section.classList.toggle('hidden',prefs[section.dataset.detailSection]===false));
+    return prefs;
+}
+function ensureDetailSectionState(anime){
+    if(detailSectionState.animeId!==anime.id) detailSectionState={animeId:anime.id,loaded:new Set()};
+}
+function renderDetailSection(name,anime,{force=false}={}){
+    ensureDetailSectionState(anime);
+    if(!force&&detailSectionState.loaded.has(name)) return;
+    detailSectionState.loaded.add(name);
+    if(name==='countdown') renderCountdown(anime);
+    else if(name==='trailer') renderTrailer(anime);
+    else if(name==='recommendations') renderRecommendations(anime);
+    else if(name==='staff') renderStaff(anime);
+    else if(name==='manga') renderRelatedManga(anime);
+    else if(name==='themes') fetchThemes(anime);
+    else if(name==='timeline') fetchFranchiseTimeline(anime);
+}
+function renderEnhancedDetails(anime) {
+    const prefs=applyDetailPreferences();
+    ensureDetailSectionState(anime);
+    Object.entries(prefs).forEach(([name,enabled])=>{
+        if(!enabled){ if(name==='countdown') clearInterval(countdownTimer); return; }
+        if(name!=='timeline') renderDetailSection(name,anime);
+    });
+}
+
+function renderCountdown(anime){
+    clearInterval(countdownTimer);
+    const box=document.getElementById('episode-countdown');
+    if(!box)return;
+    const next=anime.nextAiringEpisode;
+    if(!next){
+        if(anime.status==='FINISHED') box.innerHTML=`<strong>All announced episodes have aired.</strong>${anime.episodes?`<small>${anime.episodes} episodes completed</small>`:''}`;
+        else if(anime.status==='NOT_YET_RELEASED') box.innerHTML='<strong>Premiere date not announced yet.</strong>';
+        else if(anime.status==='CANCELLED') box.innerHTML='<strong>This anime was cancelled.</strong>';
+        else if(anime.status==='HIATUS') box.innerHTML='<strong>Currently on hiatus.</strong><small>No return episode announced.</small>';
+        else box.innerHTML='<strong>Schedule pending.</strong><small>No next episode has been announced yet.</small>';
+        return;
+    }
+    const tick=()=>{const remaining=Math.max(0,next.airingAt*1000-Date.now()); const d=Math.floor(remaining/86400000),h=Math.floor(remaining/3600000)%24,m=Math.floor(remaining/60000)%60,s=Math.floor(remaining/1000)%60; box.innerHTML=`Episode ${next.episode} airs in<div class="countdown-time">${d}d ${h}h ${m}m ${s}s</div>`;}; tick(); countdownTimer=setInterval(tick,1000);
+}
+function renderTrailer(anime){
+    const box=document.getElementById('detail-trailer');
+    if(!box)return;
+    const trailer=anime.trailer;
+    if(String(trailer?.site||'').toLowerCase()!=='youtube'||!trailer?.id){
+        const youtubeLink=(anime.externalLinks||[]).find(link=>/youtube/i.test(link.site||'')&&!link.isDisabled)?.url;
+        const searchUrl=youtubeLink||`https://www.youtube.com/results?search_query=${encodeURIComponent(`${displayTitle(anime)} official trailer PV`)}`;
+        box.innerHTML=`<div class="empty-state rich-empty"><strong>No trailer was supplied by AniList.</strong><span>Search YouTube for an official PV or trailer instead.</span><a class="btn-secondary inline-action" href="${escapeHtml(searchUrl)}" target="_blank" rel="noopener">Search on YouTube ↗</a></div>`;
+        return;
+    }
+    const rawVideoId=String(trailer.id);
+    const videoId=encodeURIComponent(rawVideoId);
+    const watchUrl=`https://www.youtube.com/watch?v=${videoId}`;
+    const thumbnail=trailer.thumbnail || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+    box.innerHTML=`<div class="trailer-preview"><img src="${escapeHtml(thumbnail)}" alt="${escapeHtml(displayTitle(anime))} trailer preview"><button class="trailer-play-button" type="button" aria-label="Play trailer">▶</button><span class="trailer-fallback-note">Embedded playback depends on browser referrer/privacy settings.</span><a class="trailer-external-link" href="${watchUrl}" target="_blank" rel="noopener">Open on YouTube ↗</a></div>`;
+    box.querySelector('.trailer-play-button')?.addEventListener('click',()=>{
+        const origin=encodeURIComponent(location.origin);
+        const widgetReferrer=encodeURIComponent(location.href.split('#')[0]);
+        box.innerHTML=`<div class="trailer-player"><iframe allowfullscreen referrerpolicy="origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" src="https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0&enablejsapi=1&origin=${origin}&widget_referrer=${widgetReferrer}" title="${escapeHtml(displayTitle(anime))} official trailer"></iframe><a class="trailer-external-link" href="${watchUrl}" target="_blank" rel="noopener">Open on YouTube ↗</a></div>`;
+    });
+}
+function renderRecommendations(anime){const box=document.getElementById('detail-recommendations'); if(!box)return; box.innerHTML=''; const recs=(anime.recommendations?.nodes||[]).map(x=>x.mediaRecommendation).filter(Boolean).filter(x=>adultContentEnabled||!x.isAdult); if(!recs.length)return box.innerHTML='<div class="empty-state">No recommendations yet.</div>'; recs.slice(0,12).forEach(x=>box.appendChild(createAnimeCard(x)));}
+function renderStaff(anime){
+    const box=document.getElementById('detail-staff');
+    if(!box)return;
+    const edges=anime.staff?.edges||[];
+    box.innerHTML='';
+    if(!edges.length){box.innerHTML='<div class="empty-state">Staff data unavailable.</div>';return;}
+    edges.slice(0,12).forEach(edge=>{
+        const person=edge.node;
+        const card=document.createElement('div');
+        card.className='staff-card';
+        card.tabIndex=0;
+        card.setAttribute('role','button');
+        const occupations=(person.primaryOccupations||[]).slice(0,2).join(' · ');
+        card.innerHTML=`${person.image?.large?`<img src="${escapeHtml(person.image.large)}" alt="${escapeHtml(person.name.full)}" loading="lazy">`:'<div class="cast-avatar-placeholder">👤</div>'}<div><strong>${escapeHtml(person.name.full)}</strong><small>${escapeHtml(edge.role||'Staff')}</small>${occupations?`<small class="staff-occupation">${escapeHtml(occupations)}</small>`:''}</div>`;
+        const open=()=>openStaffPortfolioPanel(person.id,person.name.full);
+        card.addEventListener('click',open);
+        card.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();open();}});
+        box.appendChild(card);
+    });
+}
+function renderRelatedManga(anime){
+    const box=document.getElementById('manga-continuation');
+    if(!box)return;
+    const priority={SOURCE:0,ADAPTATION:1,PARENT:2,PREQUEL:3,SEQUEL:4,SIDE_STORY:5,SPIN_OFF:6,OTHER:9};
+    const manga=(anime.relations?.edges||[]).filter(edge=>edge.node?.type==='MANGA')
+        .sort((a,b)=>(priority[a.relationType]??8)-(priority[b.relationType]??8));
+    if(!manga.length){
+        box.innerHTML='<div class="empty-state"><strong>No related manga listed.</strong><span>AniList has not linked a manga entry to this anime.</span></div>';
+        return;
+    }
+    box.innerHTML=`<div class="related-manga-list">${manga.slice(0,8).map(edge=>{const title=edge.node.title?.english||edge.node.title?.romaji||edge.node.title?.native||'Manga';return `<a class="related-manga-item" href="https://anilist.co/manga/${edge.node.id}" target="_blank" rel="noopener"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(String(edge.relationType||'RELATED').replaceAll('_',' '))} · View on AniList ↗</small></a>`;}).join('')}</div>`;
+}
+async function fetchThemes(anime){
+    const box=document.getElementById('detail-themes'); if(!box)return;
+    if(!anime.idMal){box.innerHTML='<div class="empty-state">No MAL entry is available for theme-song data.</div>';return;}
+    box.innerHTML='<div class="spinner"></div>';
+    try{
+        const full=await getJikanAnimeFull(anime.idMal);
+        const theme=full?.theme||{};
+        const rows=[...(theme.openings||[]).map(x=>['Opening',x]),...(theme.endings||[]).map(x=>['Ending',x])];
+        box.innerHTML=rows.length?rows.map(([kind,title])=>`<div class="music-item"><div><strong>${kind}</strong><small>${escapeHtml(title)}</small></div><a class="see-more-btn" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${encodeURIComponent(`${title} ${displayTitle(anime)}`)}">Search</a></div>`).join(''):'<div class="empty-state">No opening or ending songs are listed for this title.</div>';
+    }catch(e){box.innerHTML='<div class="empty-state"><strong>Theme songs are temporarily unavailable.</strong></div>';}
+}
+let newsPage = 1;
+const NEWS_PAGE_SIZE = 12;
+const malNewsPageCache = new Map();
+
+function parseMalNewsHtml(html, limit = NEWS_PAGE_SIZE) {
+    const decode = value => {
+        const textarea = document.createElement('textarea');
+        textarea.innerHTML = String(value || '');
+        return textarea.value;
+    };
+    const strip = value => stripHtml(decode(value)).replace(/\s+/g, ' ').trim();
+    const absolute = url => !url ? '' : url.startsWith('//') ? `https:${url}` : url.startsWith('/') ? `https://myanimelist.net${url}` : url;
+    const items = [];
+    const seen = new Set();
+    const linkPattern = /<a[^>]+href=["']((?:https:\/\/myanimelist\.net)?\/news\/\d+[^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    for (const match of html.matchAll(linkPattern)) {
+        const url = absolute(match[1].split('?')[0]);
+        const title = strip(match[2]);
+        if (!title || title.length < 8 || seen.has(url)) continue;
+        const at = match.index || 0;
+        const context = html.slice(Math.max(0, at - 1800), Math.min(html.length, at + 3500));
+        const imageMatch = context.match(/<(?:img|source)[^>]+(?:data-src|src)=["']([^"']+)["']/i);
+        const dateMatch = context.match(/(?:datetime=["']([^"']+)["']|class=["'][^"']*(?:date|information)[^"']*["'][^>]*>([\s\S]*?)<\/)/i);
+        const summaryMatch = context.match(/<(?:div|p)[^>]+class=["'][^"']*(?:text|summary|description)[^"']*["'][^>]*>([\s\S]*?)<\/(?:div|p)>/i);
+        items.push({ title, url, date: strip(dateMatch?.[1] || dateMatch?.[2] || ''), excerpt: strip(summaryMatch?.[1] || '').slice(0, 500), image: absolute(imageMatch?.[1] || '') });
+        seen.add(url);
+        if (items.length >= limit) break;
+    }
+    return items;
+}
+
+async function fetchPublicMalNewsFallback(page = 1, force = false) {
+    const safePage = Math.max(1, Number(page) || 1);
+    const cacheKey = `anizone:mal-news:public-page:${safePage}:v2`;
+    if (!force) {
+        try {
+            const cached = JSON.parse(localStorage.getItem(cacheKey) || 'null');
+            if (cached?.items?.length && Date.now() - cached.savedAt < 30 * 60 * 1000) return cached;
+        } catch {}
+    }
+    const malPage = `https://myanimelist.net/news${safePage > 1 ? `?p=${safePage}` : ''}`;
+    const htmlEndpoints = [
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(malPage)}`,
+        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(malPage)}`,
+    ];
+    let lastError = null;
+    for (const endpoint of htmlEndpoints) {
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 8000);
+            const response = await fetch(endpoint, { headers: { Accept: 'text/html' }, signal: controller.signal }).finally(() => clearTimeout(timeout));
+            if (!response.ok) throw new Error(`News request failed (${response.status}).`);
+            const html = await response.text();
+            const items = parseMalNewsHtml(html, NEWS_PAGE_SIZE);
+            if (items.length) {
+                const hasNextPage = new RegExp(`[?&]p=${safePage + 1}(?:[&"'])`).test(html) || items.length === NEWS_PAGE_SIZE;
+                const result = { items, page: safePage, hasNextPage, savedAt: Date.now() };
+                try { localStorage.setItem(cacheKey, JSON.stringify(result)); } catch {}
+                return result;
+            }
+        } catch (error) { lastError = error; }
+    }
+    if (safePage === 1) {
+        const rssUrl = 'https://myanimelist.net/rss/news.xml';
+        try {
+            const response = await fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(rssUrl)}`);
+            if (!response.ok) throw new Error(`News request failed (${response.status}).`);
+            const payload = await response.json();
+            const items = (payload.items || []).map(item => ({
+                title: item.title || 'MyAnimeList News', url: item.link || item.guid || 'https://myanimelist.net/news',
+                date: item.pubDate || '', excerpt: stripHtml(item.description || item.content || '').trim(),
+                image: item.thumbnail || item.enclosure?.link || '',
+            })).slice(0, NEWS_PAGE_SIZE);
+            if (items.length) return { items, page: 1, hasNextPage: false, savedAt: Date.now() };
+        } catch (error) { lastError = error; }
+    }
+    throw lastError || new Error('MyAnimeList news is temporarily unavailable.');
+}
+
+async function fetchMalNewsPage(page = 1, force = false) {
+    const safePage = Math.max(1, Number(page) || 1);
+    const cacheKey = `anizone:mal-news:page:${safePage}:v2`;
+    if (!force && malNewsPageCache.has(safePage)) return malNewsPageCache.get(safePage);
+    if (!force) {
+        try {
+            const cached = JSON.parse(localStorage.getItem(cacheKey) || 'null');
+            if (cached?.items?.length && Date.now() - cached.savedAt < 30 * 60 * 1000) {
+                malNewsPageCache.set(safePage, cached);
+                return cached;
+            }
+        } catch {}
+    }
+    const result = await fetchPublicMalNewsFallback(safePage, force);
+    malNewsPageCache.set(safePage, result);
+    try { localStorage.setItem(cacheKey, JSON.stringify({ ...result, savedAt: Date.now() })); } catch {}
+    return result;
+}
+
+async function loadNews(force = false, page = newsPage) {
+    const grid = document.getElementById('news-grid');
+    if (!grid) return;
+    newsPage = Math.max(1, Number(page) || 1);
+    grid.innerHTML = '<div class="spinner"></div>';
+    try {
+        const result = await fetchMalNewsPage(newsPage, force);
+        renderNewsItems(result.items, grid);
+        updateNewsPagination({ currentPage: newsPage, hasNextPage: result.hasNextPage });
+    } catch (error) {
+        updateNewsPagination({ currentPage: newsPage, hasNextPage: false });
+        grid.innerHTML = `<div class="empty-state api-error"><strong>MyAnimeList news is temporarily unavailable.</strong><a class="btn-secondary inline-action" href="https://myanimelist.net/news" target="_blank" rel="noopener">Open MyAnimeList News ↗</a></div>`;
+    }
+}
+
+function updateNewsPagination(pageInfo = {}) {
+    const controls = document.getElementById('news-pagination');
+    const label = document.getElementById('news-page-label');
+    const previous = document.getElementById('news-prev-btn');
+    const next = document.getElementById('news-next-btn');
+    if (!controls || !label || !previous || !next) return;
+    const current = Number(pageInfo.currentPage || newsPage || 1);
+    label.textContent = `Page ${current}`;
+    previous.disabled = current <= 1;
+    next.disabled = !pageInfo.hasNextPage;
+    controls.classList.toggle('hidden', current <= 1 && !pageInfo.hasNextPage);
+}
+
+function renderNewsItems(items, grid = document.getElementById('news-grid')) {
+    if (!grid) return;
+    if (!items.length) {
+        grid.innerHTML = '<div class="empty-state">No recent MyAnimeList news stories were returned.</div>';
+        return;
+    }
+    grid.innerHTML = items.map(item => {
+        const date = item.date ? new Date(item.date) : null;
+        const dateLabel = date && !Number.isNaN(date.getTime()) ? date.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : 'MyAnimeList News';
+        return `<article class="news-card">${item.image ? `<img src="${escapeHtml(item.image)}" alt="" loading="lazy">` : ''}<div class="news-card-body"><small>${escapeHtml(dateLabel)}</small><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml((item.excerpt || '').slice(0, 240))}</p><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Read on MyAnimeList →</a></div></article>`;
+    }).join('');
+}
+
+function enhanceSelect(select){
+    if(!select||select.dataset.azEnhanced==='true')return;
+    select.dataset.azEnhanced='true'; select.classList.add('visually-hidden-select');
+    const wrap=document.createElement('div'); wrap.className='az-select';
+    select.parentNode.insertBefore(wrap,select); wrap.appendChild(select);
+    const trigger=document.createElement('button'); trigger.type='button'; trigger.className='az-select-trigger';
+    const menu=document.createElement('div'); menu.className='az-select-menu hidden'; menu.setAttribute('role','listbox');
+    wrap.append(trigger,menu);
+    const rebuild=()=>{
+        const selected=select.options[select.selectedIndex]; trigger.textContent=selected?.textContent||'Select';
+        menu.innerHTML=''; [...select.options].forEach(option=>{const button=document.createElement('button');button.type='button';button.className=`az-select-option${option.selected?' selected':''}`;button.textContent=option.textContent;button.disabled=option.disabled;button.onclick=()=>{select.value=option.value;select.dispatchEvent(new Event('change',{bubbles:true}));close();};menu.appendChild(button);});
+    };
+    const close=()=>{wrap.classList.remove('open');menu.classList.add('hidden');};
+    trigger.onclick=e=>{e.stopPropagation();document.querySelectorAll('.az-select.open').forEach(node=>{if(node!==wrap){node.classList.remove('open');node.querySelector('.az-select-menu')?.classList.add('hidden');}});rebuild();wrap.classList.toggle('open');menu.classList.toggle('hidden',!wrap.classList.contains('open'));};
+    select._azRebuild=rebuild;
+    select.addEventListener('change',rebuild); rebuild();
+}
+function enhanceAllSelects(){ document.querySelectorAll('select').forEach(enhanceSelect); }
+function syncCustomSelects(){ document.querySelectorAll('select[data-az-enhanced="true"]').forEach(select=>select.dispatchEvent(new Event('change'))); }
+document.addEventListener('click',()=>document.querySelectorAll('.az-select.open').forEach(node=>{node.classList.remove('open');node.querySelector('.az-select-menu')?.classList.add('hidden');}));
+
+function initDetailPreferences(){
+    const button=document.getElementById('detail-preferences-btn');
+    const panel=document.getElementById('detail-preferences-panel');
+    if(!button||!panel)return;
+    const sync=()=>{const prefs=getDetailPrefs();panel.querySelectorAll('[data-detail-pref]').forEach(input=>input.checked=prefs[input.dataset.detailPref]!==false);};
+    button.onclick=()=>{sync();panel.classList.toggle('hidden');};
+    panel.addEventListener('change',event=>{const input=event.target.closest('[data-detail-pref]');if(!input)return;const name=input.dataset.detailPref;const prefs=getDetailPrefs();prefs[name]=input.checked;saveJson(DETAIL_PREFS_KEY,prefs);applyDetailPreferences();if(currentDetailAnime&&input.checked)renderDetailSection(name,currentDetailAnime);if(name==='countdown'&&!input.checked)clearInterval(countdownTimer);});
+    document.addEventListener('click',event=>{if(!panel.contains(event.target)&&event.target!==button)panel.classList.add('hidden');});
+}
+function initConnectedExperience(){
+    initThemes();
+    enhanceAllSelects();
+    syncDiscoverAdultFilter();
+    initGridDiscoverFilters();
+    initDetailPreferences();
+    document.getElementById('refresh-news-btn')?.addEventListener('click',()=>loadNews(true, newsPage));
+    document.getElementById('news-prev-btn')?.addEventListener('click',()=>{ if(newsPage > 1) loadNews(false, newsPage - 1); });
+    document.getElementById('news-next-btn')?.addEventListener('click',()=>loadNews(false, newsPage + 1));
+    document.querySelectorAll('.nav-btn').forEach(btn=>btn.addEventListener('click',()=>{if(btn.dataset.tab==='view-news')loadNews();}));
+    const baseRender=renderAnimeDetails;
+    renderAnimeDetails=function(anime){ detailSectionState={animeId:null,loaded:new Set()}; baseRender(anime); renderEnhancedDetails(anime); };
+}
+document.addEventListener('DOMContentLoaded',initConnectedExperience);

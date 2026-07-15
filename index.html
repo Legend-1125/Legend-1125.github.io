@@ -39,6 +39,7 @@
 <button class="nav-btn active" data-tab="view-home">Home</button>
 <button class="nav-btn" data-tab="view-history">My List</button>
 <button class="nav-btn" data-tab="view-schedule">Schedule</button>
+<button class="nav-btn" data-tab="view-news">News</button>
 <button class="nav-btn" id="shuffle-btn">
 <svg fill="none" height="14" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" viewbox="0 0 24 24" width="14"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" x2="21" y1="20" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" x2="21" y1="15" y2="21"></line></svg>
                     Surprise Me
@@ -52,14 +53,23 @@
 </button>
 <div class="search-input-container">
 <input autocomplete="off" id="search-input" placeholder="Titles, studios..." type="text"/>
-<button class="hidden" id="clear-search-btn">
+<button class="hidden" id="clear-search-btn" type="button" aria-label="Clear search">
 <svg fill="none" height="14" stroke="currentColor" stroke-linecap="round" stroke-width="2.5" viewbox="0 0 24 24" width="14"><line x1="18" x2="6" y1="6" y2="18"></line><line x1="6" x2="18" y1="6" y2="18"></line></svg>
+</button>
+<button class="search-submit-btn" id="search-submit-btn" type="button" aria-label="Search">
+<svg fill="none" height="14" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" viewbox="0 0 24 24" width="14"><circle cx="11" cy="11" r="7"></circle><line x1="20" x2="16.2" y1="20" y2="16.2"></line></svg>
 </button>
 </div>
 <div class="dropdown-panel hidden" id="search-suggestions"></div>
 </div>
-<div class="api-preferences"><label class="adult-toggle" title="Show adult anime"><input id="adult-content-toggle" type="checkbox"/><span>18+</span></label><select aria-label="Title language" class="nav-select" id="title-language-select"><option value="english">English</option><option value="romaji">Romaji</option></select></div><div class="profile-avatar">
-<img alt="Profile" src="https://upload.wikimedia.org/wikipedia/commons/0/0b/Netflix-avatar.png"/>
+<div class="api-preferences"><label class="adult-toggle" title="Show adult anime"><input id="adult-content-toggle" type="checkbox"/><span>18+</span></label><select aria-label="Title language" class="nav-select" id="title-language-select"><option value="english">English</option><option value="romaji">Romaji</option></select></div><div class="theme-menu-wrap" id="theme-menu-wrap">
+<button class="theme-avatar-button" id="theme-menu-btn" type="button" aria-label="Choose anime theme" aria-expanded="false">
+<img alt="Current theme" id="theme-avatar-image"/>
+</button>
+<div class="theme-menu-panel hidden" id="theme-menu-panel" role="menu">
+<div class="theme-menu-title">Anime Themes</div>
+<div id="theme-options" class="theme-options theme-options-menu"></div>
+</div>
 </div>
 </div>
 </nav>
@@ -123,7 +133,12 @@
 <h2>Discover</h2>
 <button class="see-more-btn" data-target="discover">Explore Grid <span>›</span></button>
 </div>
-<!-- Clean pill-style filter bar -->
+<!-- Compact Discover filters -->
+<div class="discover-filter-shell">
+<button class="discover-filter-toggle" id="discover-filter-toggle" type="button" aria-expanded="false" aria-controls="discover-filter-panel">
+<span>Filters</span><span class="discover-filter-chevron"></span>
+</button>
+<div class="discover-filter-panel" id="discover-filter-panel">
 <div class="filter-bar inline-filters">
 <div class="filter-pill-group">
 <select class="filter-pill" id="home-filter-genre">
@@ -198,6 +213,7 @@
 </select>
 <select class="filter-pill" id="filter-year"></select>
 <select class="filter-pill" id="filter-season">
+<option value="">All Seasons</option>
 <option value="SUMMER">Summer</option>
 <option value="SPRING">Spring</option>
 <option value="FALL">Fall</option>
@@ -217,6 +233,8 @@
 <select class="filter-pill" id="discover-rating"><option value="">Any Score</option><option value="70">Score 70+</option><option value="80">Score 80+</option><option value="90">Score 90+</option></select><select class="filter-pill hidden" id="discover-adult-filter" aria-label="Adult content filter"><option value="regular">Regular Only</option><option value="adult">18+ Only</option><option value="both">Both</option></select><button class="filter-reset-btn" id="reset-discover-filters" type="button">Reset</button>
 </div>
 </div>
+</div>
+</div>
 <div class="slider-container">
 <button class="slider-arrow left-arrow">‹</button>
 <div class="slider-track" id="row-discover"></div>
@@ -234,6 +252,19 @@
 <h2 id="grid-title">Results</h2>
 </div>
 <div class="alert-banner hidden" id="autocorrect-banner"></div>
+<!-- Discover filters for expanded grid -->
+<div class="discover-filter-shell grid-discover-filters hidden" id="grid-discover-filters">
+<button class="discover-filter-toggle" id="grid-discover-filter-toggle" type="button" aria-expanded="false" aria-controls="grid-discover-filter-panel"><span>Filters</span><span class="discover-filter-chevron"></span></button>
+<div class="discover-filter-panel" id="grid-discover-filter-panel"><div class="filter-bar inline-filters"><div class="filter-pill-group">
+<select class="filter-pill" id="grid-discover-genre"><option value="">All Genres</option></select>
+<select class="filter-pill" id="grid-discover-year"><option value="">All Years</option></select>
+<select class="filter-pill" id="grid-discover-season"><option value="">All Seasons</option><option value="SUMMER">Summer</option><option value="SPRING">Spring</option><option value="FALL">Fall</option><option value="WINTER">Winter</option></select>
+<select class="filter-pill" id="grid-discover-type"><option value="">All Types</option><option value="tv">TV</option><option value="movie">Movie</option><option value="ova">OVA</option><option value="ona">ONA</option><option value="special">Special</option></select>
+<select class="filter-pill" id="grid-discover-status"><option value="">Any Status</option><option value="airing">Currently Airing</option><option value="complete">Completed</option><option value="upcoming">Upcoming</option></select>
+<select class="filter-pill" id="grid-discover-rating"><option value="">Any Score</option><option value="70">Score 70+</option><option value="80">Score 80+</option><option value="90">Score 90+</option></select>
+<select class="filter-pill" id="grid-discover-adult"><option value="both">All Content</option><option value="regular">Regular Only</option><option value="adult">18+ Only</option></select><select class="filter-pill" id="grid-search-order"><option value="default">Best Match</option><option value="popularity">Popularity</option><option value="score">Score</option><option value="start_date">Release Date</option></select>
+<button class="filter-reset-btn" id="grid-reset-discover-filters" type="button">Reset</button>
+</div></div></div></div>
 <!-- Global Filters for search/expanded grids -->
 <div class="filter-bar global-filters" id="global-filters-container">
 <div class="filter-pill-group">
@@ -295,19 +326,31 @@
 <span class="label">Status:</span> <span class="value" id="badge-status">Loading...</span>
 </div>
 <div class="streaming-actions" id="streaming-links-container"></div>
+
 </div>
 </div>
 </div>
-<!-- Bottom: Cast & Franchise -->
+<!-- Bottom: Cast, countdown and franchise -->
+<div class="detail-controls"><button class="btn-secondary detail-preferences-btn" id="detail-preferences-btn" type="button">⚙ Page sections</button><div class="detail-preferences-panel hidden" id="detail-preferences-panel"><strong>Show on anime pages</strong><label><input type="checkbox" data-detail-pref="countdown"> Episode countdown</label><label><input type="checkbox" data-detail-pref="timeline"> Franchise timeline</label><label><input type="checkbox" data-detail-pref="trailer"> Trailer</label><label><input type="checkbox" data-detail-pref="themes"> Opening & ending themes</label><label><input type="checkbox" data-detail-pref="manga"> Related manga</label><label><input type="checkbox" data-detail-pref="staff"> Key staff</label><label><input type="checkbox" data-detail-pref="recommendations"> Recommendations</label></div></div>
 <div class="details-bottom-content">
-<div class="content-section">
+<div class="detail-top-grid">
+<div class="content-section detail-cast-column">
 <div class="section-heading-row"><h3>Cast &amp; Characters</h3><div class="cast-language-toggle" aria-label="Voice actor language"><button type="button" data-cast-language="JAPANESE">JP</button><button type="button" data-cast-language="ENGLISH">EN</button></div></div>
 <div class="cast-grid" id="characters-list"></div>
 </div>
-<div class="content-section">
+<aside class="detail-side-column">
+<div class="content-section compact-section" data-detail-section="countdown"><h3>Episode Countdown</h3><div class="countdown-panel" id="episode-countdown">No upcoming episode announced.</div></div>
+<div class="content-section franchise-section" data-detail-section="timeline">
 <h3>Franchise Timeline</h3>
 <div class="timeline-container" id="chrono-timeline"></div>
 </div>
+</aside>
+</div>
+<div class="content-section trailer-section" data-detail-section="trailer"><h3>Official Trailer</h3><div class="trailer-container" id="detail-trailer"></div></div>
+<div class="content-section themes-section" data-detail-section="themes"><h3>Opening &amp; Ending Themes</h3><div class="music-list" id="detail-themes"></div></div>
+<div class="content-section compact-section" data-detail-section="manga"><h3>Related Manga</h3><div id="manga-continuation" class="continuation-panel"></div></div>
+<div class="content-section" data-detail-section="staff"><h3>Key Staff</h3><div class="staff-grid" id="detail-staff"></div></div>
+<div class="content-section" data-detail-section="recommendations"><h3>Recommendations</h3><div class="card-grid compact-grid" id="detail-recommendations"></div></div>
 </div>
 </section>
 <!-- VIEW: SCHEDULE -->
@@ -327,6 +370,9 @@
 </div>
 <div class="card-grid" id="click-history-grid"></div>
 </section>
+
+<!-- VIEW: NEWS -->
+<section class="tab-view hidden" id="view-news"><div class="page-shell"><div class="page-header"><div><h2>Anime News</h2><p class="page-subtitle">Latest stories from MyAnimeList</p></div><button class="btn-secondary" id="refresh-news-btn">Refresh</button></div><div class="news-grid" id="news-grid"></div><div class="news-pagination hidden" id="news-pagination"><button class="btn-secondary" id="news-prev-btn" type="button">Previous</button><span id="news-page-label">Page 1</span><button class="btn-secondary" id="news-next-btn" type="button">Next</button></div></div></section>
 </main>
 <!-- VOICE ACTOR MODAL -->
 <div class="modal-overlay hidden" id="va-modal">
@@ -342,5 +388,13 @@
 </div>
 </div>
 <script src="app.js"></script>
+<div class="site-dialog-overlay hidden" id="site-dialog" role="dialog" aria-modal="true" aria-labelledby="site-dialog-title">
+<div class="site-dialog-card">
+<button class="site-dialog-close" id="site-dialog-close" type="button" aria-label="Close">×</button>
+<h3 id="site-dialog-title">AniZone</h3>
+<p id="site-dialog-message"></p>
+<div class="site-dialog-actions"><button class="btn-secondary hidden" id="site-dialog-cancel" type="button">Cancel</button><button class="btn-primary" id="site-dialog-confirm" type="button">OK</button></div>
+</div>
+</div>
 </body>
 </html>
