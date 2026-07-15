@@ -2124,3 +2124,99 @@ html::-webkit-scrollbar, body::-webkit-scrollbar, *::-webkit-scrollbar {
     outline-offset: 2px;
 }
 .github-settings-link svg { flex: 0 0 auto; }
+
+/* Requested mobile responsiveness fixes */
+.github-settings-link {
+    width: 36px;
+    min-height: 36px;
+    margin: 10px auto 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    padding: 6px;
+}
+.github-settings-link:hover {
+    transform: scale(1.08);
+    border-color: transparent;
+    background: rgba(255,255,255,.08);
+    box-shadow: none;
+}
+
+@media (max-width: 768px) {
+    .hero-nav-arrow {
+        opacity: 1;
+        width: 40px;
+        height: 56px;
+        pointer-events: auto;
+        touch-action: manipulation;
+    }
+    .hero-prev-btn { left: 4px; }
+    .hero-next-btn { right: 4px; }
+    .hero-content { padding-inline: 34px; max-width: 100%; }
+
+    .discover-row { margin-bottom: 0; }
+    .discover-filter-shell { margin-bottom: 8px; }
+    .discover-filter-panel,
+    .discover-filter-panel.open { transform: none; }
+    .discover-filter-panel:not(.open) { margin: 0; }
+    .discover-filter-panel.open { margin-bottom: 4px; }
+    .discover-row .slider-track { padding-top: 4px; }
+
+    .schedule-header { padding: 78px 4% 16px; }
+    .schedule-day-nav {
+        display: flex;
+        overflow-x: auto;
+        scroll-snap-type: x mandatory;
+        padding: 0 4% 18px;
+        gap: 8px;
+    }
+    .sched-day-btn {
+        flex: 0 0 86px;
+        min-width: 86px;
+        scroll-snap-align: start;
+    }
+    .schedule-list-container { padding: 0 4% 40px; }
+    .schedule-item {
+        display: grid;
+        grid-template-columns: 52px minmax(0, 1fr) auto;
+        grid-template-areas:
+            "poster info score"
+            "time info score";
+        align-items: center;
+        gap: 8px 12px;
+        padding: 12px 8px;
+    }
+    .sched-poster { grid-area: poster; width: 52px; height: 74px; }
+    .sched-time { grid-area: time; min-width: 0; align-items: flex-start; }
+    .sched-info { grid-area: info; }
+    .sched-score { grid-area: score; }
+    .sched-anime-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .sched-time-tz { max-width: 52px; overflow: hidden; text-overflow: ellipsis; }
+}
+
+@media (max-width: 480px) {
+    .navbar { padding-inline: 3%; }
+    .nav-left, .nav-right { gap: 8px; }
+    .logo-tagline, .api-preferences { display: none; }
+    .search-wrapper.open .search-input-container { width: min(190px, 52vw); }
+    .hero-content { padding-inline: 28px; }
+    .hero-actions .btn-primary, .hero-actions .btn-secondary { padding: 10px 14px; }
+    .schedule-item { grid-template-columns: 48px minmax(0, 1fr); grid-template-areas: "poster info" "time info"; }
+    .sched-score { display: none; }
+    .sched-genres { display: none; }
+}
+
+/* Consistent MyAnimeList news media area, including a fallback when MAL omits
+   an image or its CDN refuses a hot-linked request. */
+.news-card-image {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(135deg, var(--bg-card), var(--bg-elevated));
+    display: grid;
+    place-items: center;
+}
+.news-card-image img { width:100%; height:100%; object-fit:cover; display:block; }
+.news-card-image span { display:none; color:var(--text-muted); font-size:12px; font-weight:800; letter-spacing:.04em; }
+.news-card-image.image-missing span { display:block; }

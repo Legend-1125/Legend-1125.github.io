@@ -6,6 +6,7 @@ const JIKAN_API = 'https://api.jikan.moe/v4';
 const MAL_SCORE_PREFIX = 'anizone:mal-score:v1:';
 const MAL_SCORE_TTL = 7 * 24 * 60 * 60 * 1000;
 const PAGE_SIZE = 24;
+const SEARCH_PAGE_SIZE = 50;
 const CACHE_PREFIX = 'anizone:anilist:v2:';
 const CACHE_TTL = {
     trending: 30 * 60 * 1000,
@@ -134,6 +135,10 @@ function stripHtml(value) {
     return element.textContent || element.innerText || '';
 }
 function showLoading(show) { loading?.classList.toggle('hidden', !show); }
+function scrollPageToTop() {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: 'auto' }));
+}
 function displayTitle(anime, forceEnglish = false) {
     const titles = anime?.title || {};
     if (forceEnglish || titleLanguage === 'english') return titles.english || titles.romaji || titles.native || 'Untitled';
@@ -625,7 +630,7 @@ function syncViewRoute(targetViewId, pushState = true, extraState = {}) {
     document.getElementById(targetViewId)?.classList.remove('hidden');
     navButtons.forEach(button => button.classList.toggle('active', button.dataset.tab === targetViewId));
     if (pushState) history.pushState({ view: targetViewId, ...extraState }, '', '');
-    window.scrollTo({ top: 0 });
+    scrollPageToTop();
 }
 function handleBrowserBackNavigation(event) {
     const state = event.state;
@@ -680,6 +685,11 @@ function initNavigation() {
         syncViewRoute(tab, true);
         if (tab === 'view-history') renderHistoryLogGrid();
         if (tab === 'view-schedule') initScheduleView();
+        const hamburger = document.getElementById('hamburger-btn');
+        const panel = document.getElementById('nav-menu-panel');
+        hamburger?.setAttribute('aria-expanded', 'false');
+        hamburger?.classList.remove('open');
+        panel?.classList.remove('open-panel');
     }));
     document.getElementById('logo-btn')?.addEventListener('click', () => syncViewRoute('view-home', true));
     document.getElementById('shuffle-btn')?.addEventListener('click', triggerRandomShuffle);
@@ -701,15 +711,29 @@ function initPreferences() {
     if (adultToggle) adultToggle.checked = adultContentEnabled;
     if (languageSelect) languageSelect.value = titleLanguage;
 
-    adultToggle?.addEventListener('change', async event => {
+    adultToggle?.addEventListener('change', event => {
         adultContentEnabled = event.target.checked;
         localStorage.setItem('anizoneAdultEnabled', String(adultContentEnabled));
         if (adultContentEnabled && selectedDiscoverAdult === 'regular') selectedDiscoverAdult = 'both';
         if (!adultContentEnabled) selectedDiscoverAdult = 'regular';
         localStorage.setItem('anizoneDiscoverAdultMode', selectedDiscoverAdult);
         syncDiscoverAdultFilter();
-        await loadDashboardRows();
+
+        // Make one visible refresh per toggle. Disabling can be applied from the
+        // current in-memory data immediately. Enabling needs one fresh AniList
+        // request because adult titles were not included in the previous pool.
+        const visiblePool = pool => adultContentEnabled ? pool : pool.filter(anime => !anime.isAdult);
+        if (adultContentEnabled) {
+            loadDashboardRows({ silent: true });
+        } else {
+            renderSliderTrack('row-trending', visiblePool(dashboardPools.trending));
+            renderSliderTrack('row-top', visiblePool(dashboardPools.top));
+            renderSliderTrack('row-discover', visiblePool(dashboardPools.discover));
+            setupHeroBillboard(visiblePool(dashboardPools.trending));
+        }
+
         if (currentActiveRowTarget && !document.getElementById('view-results')?.classList.contains('hidden')) fetchExpandedGridData();
+        if (!document.getElementById('view-schedule')?.classList.contains('hidden') && scheduleInitialized) initScheduleView(true);
     });
     languageSelect?.addEventListener('change', event => {
         titleLanguage = event.target.value;
@@ -848,8 +872,8 @@ async function getDashboardBundle() {
     });
 }
 
-async function loadDashboardRows() {
-    showLoading(true);
+async function loadDashboardRows({ silent = false } = {}) {
+    if (!silent) showLoading(true);
     try {
         const data = await getDashboardBundle();
         dashboardPools.trending = data?.trending?.media || [];
@@ -864,7 +888,7 @@ async function loadDashboardRows() {
         renderRowError('row-top', error, loadDashboardRows);
         renderRowError('row-discover', error, loadDashboardRows);
     } finally {
-        showLoading(false);
+        if (!silent) showLoading(false);
     }
 }
 function renderRowError(trackId, error, retry) {
@@ -1219,7 +1243,7 @@ async function fetchExpandedGridData() {
         else if (currentActiveRowTarget === 'top') data = await getTopRated(currentPage, PAGE_SIZE);
         else if (currentActiveRowTarget === 'discover') data = await getDiscover(currentPage, PAGE_SIZE);
         else if (currentActiveRowTarget === 'studio') data = await getStudioAnime(selectedStudioId, currentPage, PAGE_SIZE, filters);
-        else data = await searchAnime(currentSearchQuery, currentPage, PAGE_SIZE, filters);
+        else data = await searchAnime(currentSearchQuery, currentPage, SEARCH_PAGE_SIZE, filters);
         if (token !== resultsRequestToken) return;
         resultsPageInfo = data.Page.pageInfo;
         renderResultsPage(grid, data.Page.media || [], resultsPageInfo);
@@ -1237,8 +1261,15 @@ function renderResultsPage(grid, items, pageInfo) {
     grid.innerHTML = '';
     if (!items.length) grid.innerHTML = '<div class="empty-state">No matching anime found.</div>';
     else items.forEach(item => grid.appendChild(createAnimeCard(item)));
-    const total = Number(pageInfo?.total || items.length);
-    document.getElementById('results-count').textContent = total >= 5000 ? '5,000+ Titles' : `${total.toLocaleString()} Titles`;
+    const apiTotal = Number(pageInfo?.total || 0);
+    const perPage = Number(pageInfo?.perPage || items.length || 1);
+    const exactTotal = pageInfo && !pageInfo.hasNextPage
+        ? Math.max(0, (Number(pageInfo.currentPage || currentPage) - 1) * perPage + items.length)
+        : null;
+    const totalLabel = exactTotal != null
+        ? `${exactTotal.toLocaleString()} Titles`
+        : `${Math.max(items.length, (Number(pageInfo?.currentPage || currentPage) - 1) * perPage + items.length).toLocaleString()}+ Titles`;
+    document.getElementById('results-count').textContent = currentActiveRowTarget === 'search' ? totalLabel : `${apiTotal.toLocaleString()} Titles`;
     updatePaginationControls(pageInfo);
 }
 function updatePaginationControls(pageInfo) {
@@ -1249,8 +1280,8 @@ function updatePaginationControls(pageInfo) {
     previous.disabled = !pageInfo || currentPage <= 1;
     next.disabled = !pageInfo?.hasNextPage;
     indicator.textContent = `Page ${currentPage}`;
-    previous.onclick = () => { if (currentPage > 1) { currentPage--; updateRoutePage(); fetchExpandedGridData(); window.scrollTo({ top: 0 }); } };
-    next.onclick = () => { if (pageInfo?.hasNextPage) { currentPage++; updateRoutePage(); fetchExpandedGridData(); window.scrollTo({ top: 0 }); } };
+    previous.onclick = () => { if (currentPage > 1) { currentPage--; updateRoutePage(); fetchExpandedGridData(); scrollPageToTop(); } };
+    next.onclick = () => { if (pageInfo?.hasNextPage) { currentPage++; updateRoutePage(); fetchExpandedGridData(); scrollPageToTop(); } };
 }
 function updateRoutePage() {
     const state = { ...(history.state || {}), page: currentPage };
@@ -1566,25 +1597,36 @@ async function openVoiceActorPortfolioPanel(personId, personName) {
 }
 
 async function triggerRandomShuffle() {
-    const localPool = [...dashboardPools.trending, ...dashboardPools.top, ...dashboardPools.discover]
-        .filter((anime, index, list) => anime?.id && (adultContentEnabled || !anime.isAdult) && list.findIndex(item => item.id === anime.id) === index);
-    if (localPool.length) {
-        const selected = localPool[Math.floor(Math.random() * localPool.length)];
-        viewSingleAnime(selected.id);
-        return;
-    }
     showLoading(true);
     try {
-        const page = Math.floor(Math.random() * 40) + 1;
-        const query = mediaPageQuery('', `, sort: POPULARITY_DESC${adultArgument()}`);
-        const data = await aniRequest(query, { page, perPage: 25 }, {
-            cacheKey: `surprise:${adultContentEnabled}:${page}`,
+        // Use AniList for every surprise instead of choosing from the dashboard,
+        // which is intentionally biased toward recent/trending titles. A single
+        // request returns full detail data, avoiding a second slow API round trip.
+        const randomPage = Math.floor(Math.random() * 12000) + 1;
+        const query = `query ($page: Int!, $isAdult: Boolean) {
+            Page(page: $page, perPage: 1) {
+                media(type: ANIME, sort: ID_DESC, isAdult: $isAdult) { ${MEDIA_DETAIL_FIELDS} }
+            }
+        }`;
+        const data = await aniRequest(query, {
+            page: randomPage,
+            isAdult: adultContentEnabled ? null : false,
+        }, {
+            cacheKey: `surprise-random:${adultContentEnabled}:${randomPage}`,
             ttl: CACHE_TTL.discover,
             priority: 'interactive',
         });
-        const pool = data.Page.media || [];
-        if (!pool.length) throw new Error('No random title found.');
-        viewSingleAnime(pool[Math.floor(Math.random() * pool.length)].id);
+        const anime = data.Page?.media?.[0];
+        if (!anime) throw new Error('No random title found. Please try again.');
+
+        currentDetailAnime = anime;
+        syncViewRoute('view-details', false);
+        history.pushState({ view: 'view-details', animeId: anime.id }, '', '');
+        renderAnimeDetails(anime);
+        renderCastProfiles(anime.characters?.edges || []);
+        appendAnimeToClickHistoryLog(anime);
+        if (getDetailPrefs().timeline) renderDetailSection('timeline', anime);
+        else document.getElementById('chrono-timeline').innerHTML = '';
     } catch (error) {
         siteAlert(error.message || 'Unable to choose a surprise anime right now.');
     } finally { showLoading(false); }
@@ -1962,7 +2004,9 @@ function initThemes() {
     document.addEventListener('keydown', event => { if (event.key === 'Escape') closeMenu(); });
 
     migrateLegacyWatchSiteDefault();
-    apply(localStorage.getItem(THEME_KEY) || 'default');
+    const savedTheme = localStorage.getItem(THEME_KEY);
+    const initialTheme = themes.some(theme => theme.id === savedTheme) ? savedTheme : 'default';
+    apply(initialTheme);
     renderWatchSites();
 }
 let countdownTimer = null;
@@ -2083,7 +2127,8 @@ async function fetchThemes(anime){
     }catch(e){box.innerHTML='<div class="empty-state"><strong>Theme songs are temporarily unavailable.</strong></div>';}
 }
 let newsPage = 1;
-const NEWS_PAGE_SIZE = 12;
+const NEWS_PAGE_SIZE = 15;
+const NEWS_CACHE_TTL = 30 * 60 * 1000;
 const malNewsPageCache = new Map();
 
 function parseMalNewsHtml(html, limit = NEWS_PAGE_SIZE) {
@@ -2093,7 +2138,13 @@ function parseMalNewsHtml(html, limit = NEWS_PAGE_SIZE) {
         return textarea.value;
     };
     const strip = value => stripHtml(decode(value)).replace(/\s+/g, ' ').trim();
-    const absolute = url => !url ? '' : url.startsWith('//') ? `https:${url}` : url.startsWith('/') ? `https://myanimelist.net${url}` : url;
+    const absolute = url => {
+        const value = decode(url || '').trim();
+        if (!value) return '';
+        if (value.startsWith('//')) return `https:${value}`;
+        if (value.startsWith('/')) return `https://myanimelist.net${value}`;
+        return value.replace(/^http:\/\//i, 'https://');
+    };
     const items = [];
     const seen = new Set();
     const linkPattern = /<a[^>]+href=["']((?:https:\/\/myanimelist\.net)?\/news\/\d+[^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
@@ -2102,96 +2153,134 @@ function parseMalNewsHtml(html, limit = NEWS_PAGE_SIZE) {
         const title = strip(match[2]);
         if (!title || title.length < 8 || seen.has(url)) continue;
         const at = match.index || 0;
-        const context = html.slice(Math.max(0, at - 1800), Math.min(html.length, at + 3500));
-        const imageMatch = context.match(/<(?:img|source)[^>]+(?:data-src|src)=["']([^"']+)["']/i);
+        const context = html.slice(Math.max(0, at - 2600), Math.min(html.length, at + 4800));
+        const imageMatches = [...context.matchAll(/<(?:img|source)[^>]+(?:data-srcset|srcset|data-src|src)=["']([^"']+)["']/gi)];
+        let image = '';
+        for (const imageMatch of imageMatches) {
+            const candidate = absolute(String(imageMatch[1]).split(/[ ,]/)[0]);
+            if (/^https:\/\//i.test(candidate) && !/icon|logo|sprite|avatar/i.test(candidate)) {
+                image = candidate;
+                break;
+            }
+        }
         const dateMatch = context.match(/(?:datetime=["']([^"']+)["']|class=["'][^"']*(?:date|information)[^"']*["'][^>]*>([\s\S]*?)<\/)/i);
         const summaryMatch = context.match(/<(?:div|p)[^>]+class=["'][^"']*(?:text|summary|description)[^"']*["'][^>]*>([\s\S]*?)<\/(?:div|p)>/i);
-        items.push({ title, url, date: strip(dateMatch?.[1] || dateMatch?.[2] || ''), excerpt: strip(summaryMatch?.[1] || '').slice(0, 500), image: absolute(imageMatch?.[1] || '') });
+        items.push({
+            title,
+            url,
+            date: strip(dateMatch?.[1] || dateMatch?.[2] || ''),
+            excerpt: strip(summaryMatch?.[1] || '').slice(0, 500),
+            image,
+        });
         seen.add(url);
         if (items.length >= limit) break;
     }
     return items;
 }
 
-async function fetchPublicMalNewsFallback(page = 1, force = false) {
-    const safePage = Math.max(1, Number(page) || 1);
-    const cacheKey = `anizone:mal-news:public-page:${safePage}:v2`;
-    if (!force) {
-        try {
-            const cached = JSON.parse(localStorage.getItem(cacheKey) || 'null');
-            if (cached?.items?.length && Date.now() - cached.savedAt < 30 * 60 * 1000) return cached;
-        } catch {}
-    }
-    const malPage = `https://myanimelist.net/news${safePage > 1 ? `?p=${safePage}` : ''}`;
-    const htmlEndpoints = [
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(malPage)}`,
-        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(malPage)}`,
-    ];
-    let lastError = null;
-    for (const endpoint of htmlEndpoints) {
-        try {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 8000);
-            const response = await fetch(endpoint, { headers: { Accept: 'text/html' }, signal: controller.signal }).finally(() => clearTimeout(timeout));
-            if (!response.ok) throw new Error(`News request failed (${response.status}).`);
-            const html = await response.text();
-            const items = parseMalNewsHtml(html, NEWS_PAGE_SIZE);
-            if (items.length) {
-                const hasNextPage = new RegExp(`[?&]p=${safePage + 1}(?:[&"'])`).test(html) || items.length === NEWS_PAGE_SIZE;
-                const result = { items, page: safePage, hasNextPage, savedAt: Date.now() };
-                try { localStorage.setItem(cacheKey, JSON.stringify(result)); } catch {}
-                return result;
-            }
-        } catch (error) { lastError = error; }
-    }
-    if (safePage === 1) {
-        const rssUrl = 'https://myanimelist.net/rss/news.xml';
-        try {
-            const response = await fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(rssUrl)}`);
-            if (!response.ok) throw new Error(`News request failed (${response.status}).`);
-            const payload = await response.json();
-            const items = (payload.items || []).map(item => ({
-                title: item.title || 'MyAnimeList News', url: item.link || item.guid || 'https://myanimelist.net/news',
-                date: item.pubDate || '', excerpt: stripHtml(item.description || item.content || '').trim(),
-                image: item.thumbnail || item.enclosure?.link || '',
-            })).slice(0, NEWS_PAGE_SIZE);
-            if (items.length) return { items, page: 1, hasNextPage: false, savedAt: Date.now() };
-        } catch (error) { lastError = error; }
-    }
-    throw lastError || new Error('MyAnimeList news is temporarily unavailable.');
+function readNewsCache(page, allowStale = false) {
+    const key = `anizone:mal-news:page:${page}:v5`;
+    try {
+        const cached = JSON.parse(localStorage.getItem(key) || 'null');
+        if (!cached?.items?.length) return null;
+        if (!allowStale && Date.now() - cached.savedAt > NEWS_CACHE_TTL) return null;
+        return cached;
+    } catch { return null; }
+}
+
+function writeNewsCache(page, result) {
+    const value = { ...result, savedAt: Date.now() };
+    malNewsPageCache.set(page, value);
+    try { localStorage.setItem(`anizone:mal-news:page:${page}:v5`, JSON.stringify(value)); } catch {}
+    return value;
 }
 
 async function fetchMalNewsPage(page = 1, force = false) {
     const safePage = Math.max(1, Number(page) || 1);
-    const cacheKey = `anizone:mal-news:page:${safePage}:v2`;
     if (!force && malNewsPageCache.has(safePage)) return malNewsPageCache.get(safePage);
     if (!force) {
-        try {
-            const cached = JSON.parse(localStorage.getItem(cacheKey) || 'null');
-            if (cached?.items?.length && Date.now() - cached.savedAt < 30 * 60 * 1000) {
-                malNewsPageCache.set(safePage, cached);
-                return cached;
-            }
-        } catch {}
+        const cached = readNewsCache(safePage);
+        if (cached) {
+            malNewsPageCache.set(safePage, cached);
+            return cached;
+        }
     }
-    const result = await fetchPublicMalNewsFallback(safePage, force);
-    malNewsPageCache.set(safePage, result);
-    try { localStorage.setItem(cacheKey, JSON.stringify({ ...result, savedAt: Date.now() })); } catch {}
-    return result;
+
+    // MyAnimeList is the sole content source. The proxy URLs only relay the
+    // exact MAL news page because MAL does not permit browser CORS requests.
+    const malPage = `https://myanimelist.net/news${safePage > 1 ? `?p=${safePage}` : ''}`;
+    const relayTargets = [
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(malPage)}`,
+        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(malPage)}`,
+        `https://corsproxy.io/?url=${encodeURIComponent(malPage)}`,
+    ];
+    const fetchEndpoint = async endpoint => {
+        let lastError = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            try {
+                const separator = endpoint.includes('?') ? '&' : '?';
+                const requestUrl = force || attempt ? `${endpoint}${separator}_=${Date.now()}-${attempt}` : endpoint;
+                const response = await fetch(requestUrl, { headers: { Accept: 'text/html' }, signal: controller.signal, cache: force ? 'no-store' : 'default' });
+                if (!response.ok) throw new Error(`News request failed (${response.status}).`);
+                const html = await response.text();
+                const items = parseMalNewsHtml(html, NEWS_PAGE_SIZE);
+                if (!items.length) throw new Error('No MyAnimeList news items returned.');
+                const explicitNext = new RegExp(`(?:[?&](?:p|page)=${safePage + 1})(?:[&"'])`).test(html);
+                const disabledNext = /class=["'][^"']*(?:next|pagination)[^"']*(?:disabled|off)[^"']*["']/i.test(html);
+                return { items, page: safePage, hasNextPage: explicitNext || (!disabledNext && items.length >= NEWS_PAGE_SIZE) };
+            } catch (error) {
+                lastError = error;
+                if (attempt === 0) await delay(450);
+            } finally { clearTimeout(timeout); }
+        }
+        throw lastError || new Error('Unable to load MyAnimeList news.');
+    };
+
+    try {
+        const result = await Promise.any(relayTargets.map(fetchEndpoint));
+        return writeNewsCache(safePage, result);
+    } catch (error) {
+        const stale = readNewsCache(safePage, true);
+        if (stale) return stale;
+        throw error;
+    }
+}
+
+function prefetchNewsPage(page) {
+    const safePage = Math.max(1, Number(page) || 1);
+    if (malNewsPageCache.has(safePage) || readNewsCache(safePage)) return;
+    fetchMalNewsPage(safePage).catch(() => {});
 }
 
 async function loadNews(force = false, page = newsPage) {
     const grid = document.getElementById('news-grid');
     if (!grid) return;
-    newsPage = Math.max(1, Number(page) || 1);
-    grid.innerHTML = '<div class="spinner"></div>';
+    const requestedPage = Math.max(1, Number(page) || 1);
+    const previousHtml = grid.innerHTML;
+    const hadStories = Boolean(grid.querySelector('.news-card'));
+    if (!hadStories) grid.innerHTML = '<div class="spinner"></div>';
+    document.getElementById('news-prev-btn')?.setAttribute('disabled', '');
+    document.getElementById('news-next-btn')?.setAttribute('disabled', '');
     try {
-        const result = await fetchMalNewsPage(newsPage, force);
+        const result = await fetchMalNewsPage(requestedPage, force);
+        newsPage = requestedPage;
         renderNewsItems(result.items, grid);
         updateNewsPagination({ currentPage: newsPage, hasNextPage: result.hasNextPage });
+        if (result.hasNextPage) prefetchNewsPage(newsPage + 1);
+        scrollPageToTop();
+        return true;
     } catch (error) {
-        updateNewsPagination({ currentPage: newsPage, hasNextPage: false });
-        grid.innerHTML = `<div class="empty-state api-error"><strong>MyAnimeList news is temporarily unavailable.</strong><a class="btn-secondary inline-action" href="https://myanimelist.net/news" target="_blank" rel="noopener">Open MyAnimeList News ↗</a></div>`;
+        if (hadStories) {
+            grid.innerHTML = previousHtml;
+            updateNewsPagination({ currentPage: newsPage, hasNextPage: true });
+            siteAlert('That MyAnimeList news page could not be loaded. Your current page has been kept.', { title: 'News unavailable' });
+        } else {
+            updateNewsPagination({ currentPage: newsPage, hasNextPage: false });
+            grid.innerHTML = `<div class="empty-state api-error"><strong>MyAnimeList news is temporarily unavailable.</strong><a class="btn-secondary inline-action" href="https://myanimelist.net/news" target="_blank" rel="noopener">Open MyAnimeList News ↗</a></div>`;
+        }
+        return false;
     }
 }
 
@@ -2214,10 +2303,13 @@ function renderNewsItems(items, grid = document.getElementById('news-grid')) {
         grid.innerHTML = '<div class="empty-state">No recent MyAnimeList news stories were returned.</div>';
         return;
     }
-    grid.innerHTML = items.map(item => {
+    grid.innerHTML = items.slice(0, NEWS_PAGE_SIZE).map(item => {
         const date = item.date ? new Date(item.date) : null;
         const dateLabel = date && !Number.isNaN(date.getTime()) ? date.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : 'MyAnimeList News';
-        return `<article class="news-card">${item.image ? `<img src="${escapeHtml(item.image)}" alt="" loading="lazy">` : ''}<div class="news-card-body"><small>${escapeHtml(dateLabel)}</small><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml((item.excerpt || '').slice(0, 240))}</p><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Read on MyAnimeList →</a></div></article>`;
+        const image = item.image
+            ? `<img src="${escapeHtml(item.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.classList.add('image-missing');this.remove()">`
+            : '';
+        return `<article class="news-card"><div class="news-card-image${item.image ? '' : ' image-missing'}">${image}<span>MyAnimeList News</span></div><div class="news-card-body"><small>${escapeHtml(dateLabel)}</small><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml((item.excerpt || '').slice(0, 240))}</p><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Read on MyAnimeList →</a></div></article>`;
     }).join('');
 }
 
@@ -2258,8 +2350,8 @@ function initConnectedExperience(){
     initGridDiscoverFilters();
     initDetailPreferences();
     document.getElementById('refresh-news-btn')?.addEventListener('click',()=>loadNews(true, newsPage));
-    document.getElementById('news-prev-btn')?.addEventListener('click',()=>{ if(newsPage > 1) loadNews(false, newsPage - 1); });
-    document.getElementById('news-next-btn')?.addEventListener('click',()=>loadNews(false, newsPage + 1));
+    document.getElementById('news-prev-btn')?.addEventListener('click',()=>{ if(newsPage > 1) { scrollPageToTop(); loadNews(false, newsPage - 1); } });
+    document.getElementById('news-next-btn')?.addEventListener('click',()=>{ scrollPageToTop(); loadNews(false, newsPage + 1); });
     document.querySelectorAll('.nav-btn').forEach(btn=>btn.addEventListener('click',()=>{if(btn.dataset.tab==='view-news')loadNews();}));
     const baseRender=renderAnimeDetails;
     renderAnimeDetails=function(anime){ detailSectionState={animeId:null,loaded:new Set()}; baseRender(anime); renderEnhancedDetails(anime); };
