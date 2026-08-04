@@ -1526,6 +1526,9 @@ async function fetchFranchiseTimeline(rootAnime) {
         else container.innerHTML = '<div class="empty-state">Could not build the franchise timeline.</div>';
     }
 }
+function timelineFormatLabel(format) {
+    return ({ TV: 'TV / Season', TV_SHORT: 'TV Short / Season', MOVIE: 'Movie', OVA: 'OVA', ONA: 'ONA', SPECIAL: 'Special', MUSIC: 'Music' })[format] || formatFormat(format);
+}
 function renderTimelineLayout(nodes, activeId) {
     const container = document.getElementById('chrono-timeline');
     container.innerHTML = '';
@@ -1534,7 +1537,7 @@ function renderTimelineLayout(nodes, activeId) {
         const current = node.id === Number(activeId);
         const element = document.createElement('div');
         element.className = `timeline-node${current ? ' current-node' : ''}`;
-        element.innerHTML = `<div class="timeline-dot"></div><div class="timeline-relation">${escapeHtml(node.relation || 'Related')} · ${escapeHtml(formatDate(node.startDate))}</div><div class="timeline-title">${escapeHtml(displayTitle(node))}</div>`;
+        element.innerHTML = `<div class="timeline-dot"></div><div class="timeline-meta-row"><div class="timeline-relation">${escapeHtml(node.relation || 'Related')} · ${escapeHtml(formatDate(node.startDate))}</div><span class="timeline-format-badge">${escapeHtml(timelineFormatLabel(node.format))}</span></div><div class="timeline-title">${escapeHtml(displayTitle(node))}</div>`;
         if (!current) element.addEventListener('click', () => viewSingleAnime(node.id));
         container.appendChild(element);
     });
