@@ -77,6 +77,10 @@
 </label>
 <div class="settings-hint">Off by default. Your choice is saved on this device.</div>
 </div>
+<div class="settings-section mal-settings">
+<div class="settings-label">MyAnimeList</div>
+<div id="mal-settings"></div>
+</div>
 <div class="settings-section website-settings">
 <div class="settings-label">Watch website</div>
 <div id="watch-site-options" class="watch-site-options"></div>
@@ -334,6 +338,7 @@
 <span class="label">Status:</span> <span class="value" id="badge-status"></span>
 </div>
 <div class="streaming-actions" id="streaming-links-container"></div>
+<div class="mal-progress" id="mal-progress"></div>
 
 </div>
 </div>
@@ -365,7 +370,7 @@
 <section class="tab-view hidden" id="view-schedule">
 <div class="schedule-header">
 <h2 class="schedule-title">Airing Schedule</h2>
-<p class="schedule-subtitle">New episodes releasing this week</p>
+<p class="schedule-subtitle">New episodes over the next 7 days · times in <span id="schedule-timezone">your time zone</span></p>
 </div>
 <div class="schedule-day-nav" id="schedule-day-nav"></div>
 <div class="schedule-list-container" id="schedule-list"></div>
@@ -373,10 +378,16 @@
 <!-- VIEW: MY LIST -->
 <section class="tab-view hidden" id="view-history">
 <div class="page-header">
-<h2>My List &amp; History</h2>
-<button class="btn-danger" id="clear-click-history">Clear History</button>
+<div><h2>My List</h2><p class="page-subtitle" id="mylist-subtitle"></p></div>
+<div class="mylist-actions" id="mylist-actions"></div>
 </div>
+<nav class="mylist-tabs" id="mylist-tabs" aria-label="My List sections"></nav>
+<div class="mylist-notice hidden" id="mylist-notice" role="status"></div>
+<div class="card-grid" id="mal-list-grid"></div>
+<div class="history-panel" id="history-panel">
+<div class="history-panel-header"><p class="page-subtitle">Anime you've opened on AniZone (saved on this device).</p><button class="btn-danger" id="clear-click-history">Clear History</button></div>
 <div class="card-grid" id="click-history-grid"></div>
+</div>
 </section>
 
 <!-- VIEW: NEWS -->
@@ -409,5 +420,6 @@
 <div class="site-dialog-actions"><button class="btn-secondary hidden" id="site-dialog-cancel" type="button">Cancel</button><button class="btn-primary" id="site-dialog-confirm" type="button">OK</button></div>
 </div>
 </div>
+<script src="mal.js"></script>
 </body>
 </html>

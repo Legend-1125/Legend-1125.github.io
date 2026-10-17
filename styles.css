@@ -1497,60 +1497,38 @@ body {
     font-weight: 500;
 }
 
-/* Day Navigation — full width, evenly spread */
+/* Day navigation: seven calendar-style buttons that fit side by side at any width */
 .schedule-day-nav {
     display: grid;
-    grid-template-columns: repeat(7, 1fr);
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     gap: 8px;
-    padding: 0 4% 28px;
+    padding: 0 4% 24px;
 }
-
 .sched-day-btn {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 4px;
-    padding: 12px 8px;
+    gap: 1px;
+    min-width: 0;
+    padding: 9px 2px 8px;
     border-radius: var(--radius-md);
     border: 1px solid var(--glass-border);
     background: var(--bg-elevated);
-    color: rgba(255,255,255,0.45);
+    color: rgba(255,255,255,0.6);
+    font: inherit;
     cursor: pointer;
-    transition: all 0.18s ease;
-    width: 100%;
+    transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
     text-align: center;
 }
-.sched-day-btn:hover {
-    border-color: rgba(255,255,255,0.2);
-    color: var(--text-white);
-    background: rgba(255,255,255,0.06);
-}
-.sched-day-btn.active {
-    background: var(--accent-red);
-    border-color: var(--accent-red);
-    color: var(--text-white);
-}
-
-.sched-day-month {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-}
-.sched-day-name {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-    opacity: 0.75;
-}
-.sched-day-btn.active .sched-day-name { opacity: 1; }
+.sched-day-btn:hover { border-color: rgba(255,255,255,0.2); color: var(--text-white); background: rgba(255,255,255,0.06); }
+.sched-day-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.sched-day-btn.active { background: var(--accent-red); border-color: var(--accent-red); color: var(--text-white); }
+.sched-day-name { font-size: 11px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+.sched-day-month { font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; white-space: nowrap; opacity: .75; }
+.sched-day-btn.active .sched-day-month { opacity: 1; }
 
 /* Schedule list */
-.schedule-list-container {
-    padding: 0 4% 60px;
-}
-
+.schedule-list-container { padding: 0 4% 60px; }
 .schedule-loading,
 .schedule-empty {
     display: flex;
@@ -1562,7 +1540,6 @@ body {
     color: var(--text-muted);
     font-size: 14px;
 }
-
 .sched-spinner {
     width: 32px;
     height: 32px;
@@ -1572,87 +1549,53 @@ body {
     animation: spinRing 0.8s linear infinite;
 }
 
+/* One row: time | poster | title and details | score */
 .schedule-item {
-    display: flex;
+    display: grid;
+    grid-template-columns: 76px 48px minmax(0, 1fr) auto;
+    grid-template-areas: "time poster info score";
     align-items: center;
-    gap: 18px;
-    padding: 13px 12px;
+    gap: 0 16px;
+    padding: 12px;
     border-bottom: 1px solid var(--glass-border);
-    cursor: pointer;
-    transition: background 0.15s, border-radius 0.15s;
     border-radius: var(--radius-sm);
+    color: inherit;
+    text-decoration: none;
+    transition: background 0.15s;
 }
-.schedule-item:hover {
-    background: rgba(255,255,255,0.05);
-}
+.schedule-item:hover { background: rgba(255,255,255,0.05); }
+.schedule-item:focus-visible { outline: 2px solid var(--accent-red); outline-offset: -2px; }
 .schedule-item:last-child { border-bottom: none; }
-
-/* Time column */
 .sched-time {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    min-width: 68px;
-    flex-shrink: 0;
-}
-.sched-time-val {
+    grid-area: time;
     font-size: 13px;
     font-weight: 700;
     color: var(--accent-red);
     font-variant-numeric: tabular-nums;
-    letter-spacing: 0.3px;
-    line-height: 1.2;
+    white-space: nowrap;
+    text-align: right;
 }
-.sched-time-tz {
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--text-muted);
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-}
-.sched-time--tba .sched-time-val {
-    color: var(--text-muted);
-    font-weight: 500;
-}
-
+.schedule-item.aired .sched-time { color: var(--text-muted); }
 .sched-poster {
+    grid-area: poster;
     width: 48px;
     height: 68px;
     object-fit: cover;
     border-radius: 5px;
-    flex-shrink: 0;
     background: var(--bg-elevated);
 }
-
-.sched-info {
-    flex: 1;
-    min-width: 0;
-}
+.sched-info { grid-area: info; min-width: 0; }
 .sched-anime-title {
     font-size: 14px;
     font-weight: 700;
+    line-height: 1.3;
     color: var(--text-white);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
     margin-bottom: 5px;
+    overflow-wrap: anywhere;   /* full title, wrapped as needed */
 }
-.sched-meta {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-}
-.sched-ep {
-    font-size: 12px;
-    color: var(--text-muted);
-    font-weight: 500;
-}
-.sched-genres {
-    font-size: 11px;
-    color: rgba(255,255,255,0.35);
-    font-weight: 500;
-}
+.sched-meta { display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; }
+.sched-ep { font-size: 12px; color: var(--text-muted); font-weight: 500; white-space: nowrap; }
+.sched-genres { font-size: 11px; color: rgba(255,255,255,0.45); font-weight: 500; }
 .sched-badge {
     font-size: 10px;
     font-weight: 700;
@@ -1660,31 +1603,34 @@ body {
     border-radius: 4px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    white-space: nowrap;
 }
-.sched-badge.airing {
-    background: rgba(6,182,212,0.12);
-    color: var(--accent-cyan);
-    border: 1px solid rgba(6,182,212,0.3);
-}
-
+.sched-badge.airing { background: rgba(6,182,212,0.12); color: var(--accent-cyan); border: 1px solid rgba(6,182,212,0.3); }
+.sched-badge.aired { background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid var(--glass-border); }
 .sched-score {
+    grid-area: score;
     font-size: 12px;
     font-weight: 700;
     color: #f5c518;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    gap: 3px;
-    min-width: 36px;
-    justify-content: flex-end;
+    white-space: nowrap;
 }
 
-/* Responsive */
-@media (max-width: 600px) {
-    .schedule-day-nav { gap: 5px; }
-    .sched-day-month { font-size: 9px; }
-    .sched-day-name { font-size: 9px; }
-    .sched-day-btn { padding: 10px 4px; }
+/* Narrow screens: the time moves above the title instead of squeezing beside it */
+@media (max-width: 560px) {
+    .schedule-day-nav { gap: 4px; padding-inline: 12px; }
+    .sched-day-btn { padding: 8px 0 7px; }
+    .sched-day-name, .sched-day-month { font-size: 10px; letter-spacing: .02em; }
+    .schedule-list-container { padding-inline: 12px; }
+    .schedule-item {
+        grid-template-columns: 52px minmax(0, 1fr) auto;
+        grid-template-areas: "poster time score" "poster info score";
+        align-items: start;
+        gap: 2px 12px;
+        padding: 12px 4px;
+    }
+    .sched-time { text-align: left; font-size: 12px; }
+    .sched-poster { width: 52px; height: 74px; }
+    .sched-score { align-self: center; }
 }
 /* ==========================================
    ANILIST PREFERENCES & MIGRATION ADDITIONS
@@ -2185,35 +2131,6 @@ html::-webkit-scrollbar, body::-webkit-scrollbar, *::-webkit-scrollbar {
     .discover-row .slider-track { padding-top: 4px; }
 
     .schedule-header { padding: 78px 4% 16px; }
-    .schedule-day-nav {
-        display: flex;
-        overflow-x: auto;
-        scroll-snap-type: x mandatory;
-        padding: 0 4% 18px;
-        gap: 8px;
-    }
-    .sched-day-btn {
-        flex: 0 0 86px;
-        min-width: 86px;
-        scroll-snap-align: start;
-    }
-    .schedule-list-container { padding: 0 4% 40px; }
-    .schedule-item {
-        display: grid;
-        grid-template-columns: 52px minmax(0, 1fr) auto;
-        grid-template-areas:
-            "poster info score"
-            "time info score";
-        align-items: center;
-        gap: 8px 12px;
-        padding: 12px 8px;
-    }
-    .sched-poster { grid-area: poster; width: 52px; height: 74px; }
-    .sched-time { grid-area: time; min-width: 0; align-items: flex-start; }
-    .sched-info { grid-area: info; }
-    .sched-score { grid-area: score; }
-    .sched-anime-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-    .sched-time-tz { max-width: 52px; overflow: hidden; text-overflow: ellipsis; }
 }
 
 @media (max-width: 480px) {
@@ -2223,9 +2140,6 @@ html::-webkit-scrollbar, body::-webkit-scrollbar, *::-webkit-scrollbar {
     .search-wrapper.open .search-input-container { width: min(190px, 52vw); }
     .hero-content { padding-inline: 28px; }
     .hero-actions .btn-primary, .hero-actions .btn-secondary { padding: 10px 14px; }
-    .schedule-item { grid-template-columns: 48px minmax(0, 1fr); grid-template-areas: "poster info" "time info"; }
-    .sched-score { display: none; }
-    .sched-genres { display: none; }
 }
 
 /* Consistent MyAnimeList news media area, including a fallback when MAL omits
@@ -2282,3 +2196,150 @@ a.studio-link:focus-visible { text-decoration: underline; color: var(--accent-cy
 .news-skeleton i:nth-child(3) { width: 70%; }
 @keyframes news-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @media (prefers-reduced-motion: reduce) { .news-skeleton .news-card-image, .news-skeleton i { animation: none; } }
+
+/* ==========================================
+   MYANIMELIST SYNC (mal.js)
+   ========================================== */
+.mal-badge { display:inline-grid; place-items:center; min-width:34px; height:20px; padding:0 6px; border-radius:5px; background:#2e51a2; color:#fff; font-size:10px; font-weight:900; letter-spacing:.04em; }
+.mal-progress { margin-top:16px; max-width:640px; }
+.mal-progress:empty { display:none; }
+.mal-progress-note { color:var(--text-muted); font-size:13px; }
+.mal-progress-card { background:rgba(15,15,15,.72); border:1px solid var(--glass-border); border-radius:var(--radius-md); padding:14px 16px; backdrop-filter:blur(6px); }
+.mal-progress-login { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.mal-progress-login .btn-secondary { margin-left:auto; padding:8px 14px; }
+.mal-progress-head { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+.mal-save-state { margin-left:auto; font-size:12px; color:var(--text-muted); }
+.mal-save-state.saved, .mal-save-state.removed { color:#4ade80; }
+.mal-save-state.error { color:#fca5a5; }
+.mal-progress-row { display:flex; flex-wrap:wrap; gap:12px 18px; align-items:flex-end; }
+.mal-field { display:flex; flex-direction:column; gap:5px; font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; }
+.mal-field select, .mal-episodes input {
+    background:var(--bg-elevated); color:var(--text-white); border:1px solid rgba(255,255,255,.14); border-radius:8px;
+    padding:8px 10px; font:inherit; font-size:14px; font-weight:600; text-transform:none; letter-spacing:0;
+}
+.mal-field select { min-width:150px; cursor:pointer; }
+.mal-field select:focus-visible, .mal-episodes input:focus-visible, .mal-episodes button:focus-visible { outline:2px solid var(--accent-red); outline-offset:1px; }
+.mal-episodes { display:flex; align-items:center; gap:6px; }
+.mal-episodes input { width:64px; text-align:center; -moz-appearance:textfield; }
+.mal-episodes input::-webkit-outer-spin-button, .mal-episodes input::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+.mal-episodes button { width:34px; height:36px; border-radius:8px; border:1px solid rgba(255,255,255,.14); background:var(--bg-elevated); color:#fff; font-size:18px; font-weight:800; cursor:pointer; }
+.mal-episodes button:hover:not(:disabled) { background:var(--accent-red); border-color:var(--accent-red); }
+.mal-episodes button:disabled { opacity:.35; cursor:default; }
+.mal-total { color:var(--text-muted); font-size:14px; font-weight:600; text-transform:none; letter-spacing:0; }
+.mal-progress-bar { height:4px; margin:14px 0 10px; border-radius:4px; background:rgba(255,255,255,.08); overflow:hidden; }
+.mal-progress-bar span, .mal-card-progress span { display:block; height:100%; background:var(--accent-red); border-radius:inherit; transition:width .3s var(--transition-smooth); }
+.mal-progress-foot { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--text-muted); }
+.mal-progress-foot a { color:var(--accent-cyan); text-decoration:none; font-weight:700; }
+.mal-link-btn { background:none; border:0; padding:0; color:var(--text-muted); font:inherit; font-size:12px; text-decoration:underline; cursor:pointer; }
+.mal-link-btn:hover { color:#fff; }
+.mal-save-state .mal-link-btn { color:#fca5a5; margin-left:4px; }
+
+/* My List */
+.mylist-actions { display:flex; gap:8px; align-items:center; }
+.mylist-tabs { display:flex; gap:6px; flex-wrap:wrap; margin:4px 0 18px; }
+.mylist-tab { padding:8px 14px; border-radius:999px; border:1px solid var(--glass-border); background:var(--bg-elevated); color:rgba(255,255,255,.8); text-decoration:none; font-size:13px; font-weight:700; }
+.mylist-tab span { margin-left:4px; color:var(--text-muted); font-weight:600; }
+.mylist-tab:hover { border-color:rgba(255,255,255,.25); color:#fff; }
+.mylist-tab.active { background:var(--accent-red); border-color:var(--accent-red); color:#fff; }
+.mylist-tab.active span { color:rgba(255,255,255,.8); }
+.mylist-tab:focus-visible { outline:2px solid #fff; outline-offset:2px; }
+.mylist-notice { margin:-6px 0 16px; padding:10px 14px; border-radius:9px; background:rgba(255,255,255,.04); border:1px solid var(--glass-border); color:var(--text-muted); font-size:13px; }
+.mylist-notice.error { color:#fca5a5; border-color:rgba(252,165,165,.3); }
+.history-panel-header { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:14px; }
+.history-panel-header .page-subtitle { margin:0; }
+.mal-card-progress { position:absolute; left:0; right:0; bottom:0; height:3px; background:rgba(255,255,255,.12); z-index:2; }
+.mal-card-plus { position:absolute; top:6px; right:6px; z-index:3; padding:4px 8px; border-radius:999px; border:1px solid rgba(255,255,255,.25); background:rgba(0,0,0,.72); color:#fff; font-size:11px; font-weight:800; cursor:pointer; }
+.mal-card-plus:hover, .mal-card-plus:focus-visible { background:var(--accent-red); border-color:var(--accent-red); outline:none; }
+@media (hover:hover) { .mal-card .mal-card-plus { opacity:.0; transition:opacity .2s; } .mal-card:hover .mal-card-plus, .mal-card:focus-within .mal-card-plus { opacity:1; } }
+
+/* Profile Settings */
+.mal-account { display:flex; align-items:center; gap:10px; margin-top:6px; }
+.mal-account img { width:34px; height:34px; border-radius:50%; object-fit:cover; }
+.mal-account strong { display:block; font-size:13px; }
+.mal-account small { color:var(--text-muted); font-size:11px; }
+.mal-settings-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+.mal-login-btn { border-style:solid; background:#2e51a2; border-color:#2e51a2; }
+.mal-relay { margin-top:8px; font-size:11px; color:var(--text-muted); }
+.mal-relay summary { cursor:pointer; }
+.mal-relay-form { display:flex; gap:6px; margin-top:6px; }
+.mal-relay-form input { flex:1; min-width:0; padding:7px 8px; border-radius:7px; border:1px solid rgba(255,255,255,.16); background:var(--bg-elevated); color:#fff; font-size:11px; }
+.mal-relay-form .settings-add-btn { width:auto; margin:0; padding:7px 10px; }
+
+/* Toasts */
+.az-toasts { position:fixed; left:50%; bottom:22px; transform:translateX(-50%); z-index:10000; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; width:min(92vw, 420px); }
+.az-toast { padding:10px 16px; border-radius:10px; background:#1f1f1f; border:1px solid var(--glass-border); color:#fff; font-size:13px; box-shadow:0 10px 30px rgba(0,0,0,.45); transition:opacity .35s, transform .35s; text-align:center; }
+.az-toast.success { border-color:rgba(74,222,128,.4); }
+.az-toast.warn { border-color:rgba(250,204,21,.45); }
+.az-toast.error { border-color:rgba(252,165,165,.5); }
+.az-toast.leaving { opacity:0; transform:translateY(8px); }
+@media (max-width:600px) {
+    .mal-progress-row { gap:12px; }
+    .mal-field select { min-width:0; width:100%; }
+    .mal-progress-row > label { flex:1 1 140px; }
+    .history-panel-header { flex-direction:column; align-items:flex-start; }
+}
+
+/* ==========================================
+   NOTHING CUT OFF AT ANY WIDTH
+   ========================================== */
+/* Safety net: nothing may make the whole page scroll sideways. ("clip" doesn't
+   create a scroll container, so the sticky navbar keeps working.) */
+html, body { overflow-x: clip; }
+
+/* Row arrows stay inside the screen; on touch screens rows are swiped instead. */
+@media (max-width: 768px) {
+    .left-arrow { left: 0; }
+    .right-arrow { right: 0; }
+}
+@media (hover: none) { .slider-arrow { display: none; } }
+
+/* Grid cards may shrink below their row-card minimum width. */
+.card-grid .anime-card { min-width: 0; }
+
+/* Card titles: main title up to two lines, alternate title one line; the full
+   title shows on hover. */
+.anime-card-title { white-space: normal; text-overflow: clip; }
+.anime-card-name {
+    font-weight: inherit;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+}
+.anime-card-title > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Wide screens: the open Filters panel uses the space beside its button and
+   wraps onto a second line instead of running off the screen. */
+@media (min-width: 981px) {
+    .discover-filter-panel.open,
+    #view-results .grid-discover-filters .discover-filter-panel.open { flex: 1 1 auto; min-width: 0; max-width: 100%; }
+    .discover-filter-panel .filter-pill-group { flex-wrap: wrap; }
+}
+
+/* Phones: an open search box takes the logo's place instead of pushing the
+   profile button off the screen. */
+@media (max-width: 600px) {
+    .navbar:has(.search-wrapper.open) .nav-left,
+    .navbar:has(.search-wrapper.open) .api-preferences { display: none; }
+    .navbar:has(.search-wrapper.open) .nav-right { flex: 1; min-width: 0; }
+    .navbar:has(.search-wrapper.open) .search-wrapper { flex: 1; min-width: 0; }
+    .search-wrapper.open .search-input-container { width: auto; flex: 1; min-width: 0; }
+}
+
+/* Long anime titles scale down instead of filling the screen on phones. */
+#detail-title { font-size: clamp(1.7rem, 4vw + 0.6rem, 2.6rem); overflow-wrap: anywhere; }
+#detail-title.long-title { font-size: clamp(1.35rem, 2.4vw + 0.7rem, 2.1rem); line-height: 1.15; }
+#detail-title .detail-alt-title { overflow-wrap: anywhere; }
+
+/* Progress panel reads left-to-right even where the anime page is centred. */
+.mal-progress { text-align: left; }
+@media (max-width: 768px) { .mal-progress { margin-inline: auto; width: 100%; } }
+
+/* Header buttons never wrap mid-label. */
+.mylist-actions .btn-primary, .mylist-actions .btn-secondary, #refresh-news-btn { white-space: nowrap; }
+@media (max-width: 480px) {
+    #view-history .page-header { flex-wrap: wrap; gap: 10px; }
+}
+#detail-title.long-title .detail-alt-title { font-size: .58em; }

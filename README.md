@@ -583,6 +583,15 @@ Clearing browser site data resets these preferences and history.
 
 ---
 
+## MyAnimeList Sync
+
+AniZone can log in to your MyAnimeList account and track your progress:
+status, episodes watched and score on every anime page, and your real
+MyAnimeList list on **My List**. It needs a one-time setup of a small free relay
+(a Cloudflare Worker). See **[worker/README.md](worker/README.md)**.
+
+---
+
 ## 18. Security and Privacy Notes
 
 - Only HTTPS watch-site addresses are accepted.

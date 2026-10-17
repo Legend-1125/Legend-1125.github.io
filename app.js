@@ -374,7 +374,7 @@ async function getAnimeByMalId(malId) {
     const query = `query ($idMal: Int!) {
         Media(idMal: $idMal, type: ANIME) { id idMal isAdult title { romaji english native } }
     }`;
-    return aniRequest(query, { idMal: Number(malId) });
+    return aniRequest(query, { idMal: Number(malId) }, { cacheKey: `mal-to-anilist:${Number(malId)}`, ttl: 30 * 24 * 60 * 60 * 1000, priority: 'interactive' });
 }
 
 class AniListError extends Error {
@@ -843,7 +843,11 @@ function parseRoute(hash = location.hash) {
     }
     if (section === 'browse' && BROWSE_TARGETS.has(id)) return { name: 'browse', target: id, page };
     if (section === 'studio' && numericId) return { name: 'studio', id: numericId, studioName: params.get('name') || '', page };
-    if (['list', 'schedule', 'news'].includes(section) && segments.length === 1) return { name: section };
+    if (section === 'list' && segments.length === 1) return { name: 'list', tab: params.get('tab') || '' };
+    if (['schedule', 'news'].includes(section) && segments.length === 1) return { name: section };
+    // MyAnimeList sync (mal.js): login return and "open this MAL entry in AniZone".
+    if (section === 'mal-callback') return { name: 'mal-callback', code: params.get('code') || '', state: params.get('state') || '', error: params.get('error') || '' };
+    if (section === 'mal' && numericId) return { name: 'mal-anime', id: numericId };
     return { name: 'not-found' };
 }
 
@@ -947,8 +951,19 @@ function renderRoute({ fresh = false } = {}) {
         case 'list':
             setPageTitle('My List');
             showView('view-history');
-            renderHistoryLogGrid();
+            if (window.MalSync) MalSync.renderMyList(route.tab);
+            else renderHistoryLogGrid();
             restorePendingScroll();
+            break;
+        case 'mal-callback':
+            pendingScrollRestore = null;
+            setPageTitle('My List');
+            showView('view-history');
+            MalSync.handleCallback(route);
+            break;
+        case 'mal-anime':
+            pendingScrollRestore = null;
+            MalSync.openByMalId(route.id);
             break;
         case 'schedule':
             pendingScrollRestore = null;
@@ -1089,11 +1104,13 @@ function initPreferences() {
 
         if (currentActiveRowTarget && !document.getElementById('view-results')?.classList.contains('hidden')) fetchExpandedGridData();
         if (!document.getElementById('view-schedule')?.classList.contains('hidden') && scheduleInitialized) initScheduleView(true);
+        window.MalSync?.refreshViews();
     });
     languageSelect?.addEventListener('change', event => {
         titleLanguage = event.target.value;
         localStorage.setItem('anizoneTitleLanguage', titleLanguage);
         updateVisibleTitlesForLanguage();
+        window.MalSync?.refreshViews();
     });
 }
 
@@ -1105,7 +1122,8 @@ function updateVisibleTitlesForLanguage() {
         if (!anime || !titleNode) return;
         const title = displayTitle(anime);
         const alt = secondaryTitle(anime);
-        titleNode.innerHTML = `${escapeHtml(title)}${alt ? `<span>${escapeHtml(alt)}</span>` : ''}`;
+        titleNode.innerHTML = `<strong class="anime-card-name">${escapeHtml(title)}</strong>${alt ? `<span>${escapeHtml(alt)}</span>` : ''}`;
+        card.querySelector('.anime-card-link')?.setAttribute('title', alt ? `${title} (${alt})` : title);
         const removeButton = card.querySelector('.card-eraser-btn');
         if (removeButton) removeButton.setAttribute('aria-label', `Remove ${title} from history`);
     });
@@ -1114,7 +1132,10 @@ function updateVisibleTitlesForLanguage() {
         const primary = displayTitle(currentDetailAnime);
         const alternate = secondaryTitle(currentDetailAnime);
         const title = document.getElementById('detail-title');
-        if (title) title.innerHTML = `${escapeHtml(primary)}${alternate ? `<span class="detail-alt-title">${escapeHtml(alternate)}</span>` : ''}`;
+        if (title) {
+            title.innerHTML = `${escapeHtml(primary)}${alternate ? `<span class="detail-alt-title">${escapeHtml(alternate)}</span>` : ''}`;
+            title.classList.toggle('long-title', primary.length > 45);
+        }
         renderCastProfiles(currentCastEdges, false);
     }
     if (!document.getElementById('view-schedule')?.classList.contains('hidden') && scheduleInitialized) initScheduleView(true);
@@ -1190,7 +1211,7 @@ async function fetchSearchSuggestions(queryText) {
             const row = document.createElement('div');
             row.className = 'suggestion-item';
             const alt = secondaryTitle(item);
-            row.innerHTML = `<span><strong>${escapeHtml(displayTitle(item))}</strong>${alt ? `<small>${escapeHtml(alt)}</small>` : ''}</span><span class="sug-score">${item.averageScore ? `★ ${(item.averageScore / 10).toFixed(1)}` : 'N/A'}</span>`;
+            row.innerHTML = `<span><strong>${escapeHtml(displayTitle(item))}</strong>${alt ? `<small>${escapeHtml(alt)}</small>` : ''}</span><span class="sug-score"${item.averageScore ? ' title="AniList score (out of 100)"' : ''}>${item.averageScore ? `★ ${Math.round(item.averageScore)}` : 'N/A'}</span>`;
             row.addEventListener('click', () => { suggestionsDropdown.classList.add('hidden'); viewSingleAnime(item.id); });
             suggestionsDropdown.appendChild(row);
         });
@@ -1280,7 +1301,7 @@ function createAnimeCard(anime, isHistory = false) {
     // A real link: reachable with Tab, opens in a new tab with middle-click or long-press,
     // and its address can be copied and shared. The poster is decorative because the
     // title text inside the link already names it.
-    card.innerHTML = `<a class="anime-card-link" href="${animeHash(anime.id)}"><img src="${escapeHtml(imageUrl(anime))}" alt="" loading="lazy">${anime.isAdult ? '<span class="adult-card-badge">18+</span>' : ''}<div class="anime-card-overlay"></div><div class="anime-card-title">${escapeHtml(title)}${alt ? `<span>${escapeHtml(alt)}</span>` : ''}</div></a>`;
+    card.innerHTML = `<a class="anime-card-link" href="${animeHash(anime.id)}" title="${escapeHtml(alt ? `${title} (${alt})` : title)}"><img src="${escapeHtml(imageUrl(anime))}" alt="" loading="lazy">${anime.isAdult ? '<span class="adult-card-badge">18+</span>' : ''}<div class="anime-card-overlay"></div><div class="anime-card-title"><strong class="anime-card-name">${escapeHtml(title)}</strong>${alt ? `<span>${escapeHtml(alt)}</span>` : ''}</div></a>`;
     if (anime.isAdult) card.classList.add('adult-card');
     if (isHistory) {
         // Kept outside the link: a button nested inside a link is invalid HTML.
@@ -1685,6 +1706,8 @@ function resetDetailView() {
     document.getElementById('detail-studio').textContent = '';
     document.getElementById('badge-status').textContent = '';
     document.getElementById('streaming-links-container').innerHTML = '';
+    const malProgress = document.getElementById('mal-progress');
+    if (malProgress) malProgress.innerHTML = '';
     const spinner = '<div class="spinner"></div>';
     document.getElementById('characters-list').innerHTML = spinner;
     document.getElementById('chrono-timeline').innerHTML = spinner;
@@ -1708,6 +1731,7 @@ async function showAnimeDetails(animeId) {
         currentDetailAnime = anime;
         setPageTitle(displayTitle(anime));
         renderAnimeDetails(anime);
+        window.MalSync?.renderProgressPanel(anime);
         renderCastProfiles(anime.characters?.edges || []);
         appendAnimeToClickHistoryLog(anime);
         if (getDetailPrefs().timeline) renderDetailSection('timeline', anime);
@@ -1734,6 +1758,7 @@ function renderAnimeDetails(anime) {
     const primary = displayTitle(anime);
     const alternate = secondaryTitle(anime);
     document.getElementById('detail-title').innerHTML = `${escapeHtml(primary)}${alternate ? `<span class="detail-alt-title">${escapeHtml(alternate)}</span>` : ''}`;
+    document.getElementById('detail-title').classList.toggle('long-title', primary.length > 45);
     document.getElementById('detail-synopsis').textContent = stripHtml(anime.description) || 'No synopsis available.';
     const adultWarning = document.getElementById('detail-adult-warning');
     if (adultWarning) adultWarning.classList.toggle('hidden', !anime.isAdult);
@@ -2078,34 +2103,54 @@ function renderHistoryLogGrid() {
     visible.forEach(item => grid.appendChild(createAnimeCard(item, true)));
 }
 
+let scheduleSelectedOffset = 0;
+let scheduleRequestToken = 0;
+// Rebuilt on every visit, so "Today" stays right after midnight.
 function initScheduleView() {
-    if (!scheduleInitialized) {
-        buildDayNav();
-        scheduleInitialized = true;
-    } else {
-        fetchScheduleForDate(new Date());
-    }
+    buildDayNav(scheduleInitialized ? scheduleSelectedOffset : 0);
+    scheduleInitialized = true;
 }
-function buildDayNav() {
+function scheduleTimeZoneLabel() {
+    try {
+        const zone = new Intl.DateTimeFormat([], { timeZoneName: 'long' }).formatToParts(new Date()).find(part => part.type === 'timeZoneName')?.value;
+        return zone || Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/_/g, ' ');
+    } catch { return 'your time zone'; }
+}
+function buildDayNav(selected = 0) {
     const nav = document.getElementById('schedule-day-nav');
+    const zone = document.getElementById('schedule-timezone');
+    if (zone) zone.textContent = scheduleTimeZoneLabel();
     nav.innerHTML = '';
     const today = new Date();
     for (let offset = 0; offset < 7; offset++) {
         const date = new Date(today);
         date.setDate(today.getDate() + offset);
         const button = document.createElement('button');
-        button.className = `sched-day-btn${offset === 0 ? ' active' : ''}`;
-        button.innerHTML = `<span class="sched-day-month">${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}</span><span class="sched-day-name">${offset === 0 ? 'Today' : date.toLocaleDateString([], { weekday: 'short' })}</span>`;
+        button.type = 'button';
+        button.className = `sched-day-btn${offset === selected ? ' active' : ''}`;
+        button.setAttribute('aria-pressed', String(offset === selected));
+        button.innerHTML = `<span class="sched-day-name">${offset === 0 ? 'Today' : date.toLocaleDateString([], { weekday: 'short' })}</span><span class="sched-day-month">${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>`;
         button.addEventListener('click', () => {
-            nav.querySelectorAll('.sched-day-btn').forEach(item => item.classList.remove('active'));
-            button.classList.add('active');
+            scheduleSelectedOffset = offset;
+            nav.querySelectorAll('.sched-day-btn').forEach(item => { item.classList.toggle('active', item === button); item.setAttribute('aria-pressed', String(item === button)); });
+            keepDayVisible(nav, button);
             fetchScheduleForDate(date);
         });
         nav.appendChild(button);
     }
-    fetchScheduleForDate(today);
+    keepDayVisible(nav, nav.querySelector('.sched-day-btn.active'));
+    const day = new Date(today);
+    day.setDate(today.getDate() + selected);
+    fetchScheduleForDate(day);
+}
+// On narrow screens the day strip scrolls sideways; keep the chosen day in view.
+function keepDayVisible(nav, button) {
+    if (!nav || !button || nav.scrollWidth <= nav.clientWidth) return;
+    const left = button.offsetLeft - nav.offsetLeft;
+    if (left < nav.scrollLeft || left + button.offsetWidth > nav.scrollLeft + nav.clientWidth) nav.scrollTo({ left: Math.max(0, left - 16), behavior: 'instant' });
 }
 async function fetchScheduleForDate(date) {
+    const token = ++scheduleRequestToken;   // a quicker click on another day wins
     const list = document.getElementById('schedule-list');
     list.innerHTML = '<div class="schedule-loading"><div class="sched-spinner"></div><span>Fetching schedule...</span></div>';
     const start = new Date(date); start.setHours(0, 0, 0, 0);
@@ -2127,8 +2172,10 @@ async function fetchScheduleForDate(date) {
             all.push(...(data.Page.airingSchedules || []));
             if (!data.Page.pageInfo.hasNextPage) break;
         }
+        if (token !== scheduleRequestToken) return;
         renderScheduleList(all.filter(item => adultContentEnabled || !item.media.isAdult));
     } catch (error) {
+        if (token !== scheduleRequestToken) return;
         list.innerHTML = `<div class="schedule-empty"><span>${escapeHtml(error.message || 'Could not load schedule.')}</span></div>`;
     }
 }
@@ -2136,13 +2183,22 @@ function renderScheduleList(items) {
     const list = document.getElementById('schedule-list');
     list.innerHTML = '';
     if (!items.length) { list.innerHTML = '<div class="schedule-empty"><span>No episodes scheduled.</span></div>'; return; }
+    const now = Date.now();
     items.sort((a, b) => a.airingAt - b.airingAt).forEach(entry => {
         const anime = entry.media;
         const time = new Date(entry.airingAt * 1000);
-        const item = document.createElement('div');
-        item.className = 'schedule-item';
-        item.innerHTML = `<div class="sched-time"><span class="sched-time-val">${time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span><span class="sched-time-tz">${Intl.DateTimeFormat().resolvedOptions().timeZone}</span></div><img class="sched-poster" src="${escapeHtml(imageUrl(anime))}" alt="${escapeHtml(displayTitle(anime))}" loading="lazy"><div class="sched-info"><div class="sched-anime-title">${escapeHtml(displayTitle(anime))}</div><div class="sched-meta"><span class="sched-ep">Episode ${entry.episode}</span>${anime.genres?.length ? `<span class="sched-genres">${escapeHtml(anime.genres.slice(0,2).join(' · '))}</span>` : ''}<span class="sched-badge airing">Airing</span></div></div>${anime.averageScore ? `<div class="sched-score">★ ${(anime.averageScore / 10).toFixed(1)}</div>` : ''}`;
-        item.addEventListener('click', () => viewSingleAnime(anime.id));
+        const aired = time.getTime() <= now;
+        const title = displayTitle(anime);
+        const item = document.createElement('a');
+        item.className = `schedule-item${aired ? ' aired' : ''}`;
+        item.href = animeHash(anime.id);
+        item.innerHTML = `<time class="sched-time" datetime="${time.toISOString()}">${time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>`
+            + `<img class="sched-poster" src="${escapeHtml(imageUrl(anime))}" alt="" loading="lazy">`
+            + `<div class="sched-info"><div class="sched-anime-title">${escapeHtml(title)}</div>`
+            + `<div class="sched-meta"><span class="sched-ep">Episode ${entry.episode}${anime.episodes ? ` of ${anime.episodes}` : ''}</span>`
+            + `${anime.genres?.length ? `<span class="sched-genres">${escapeHtml(anime.genres.slice(0, 2).join(' · '))}</span>` : ''}`
+            + `<span class="sched-badge ${aired ? 'aired' : 'airing'}">${aired ? 'Aired' : 'Upcoming'}</span></div></div>`
+            + `${anime.averageScore ? `<div class="sched-score" title="AniList score (out of 100)">★ ${Math.round(anime.averageScore)}</div>` : ''}`;
         list.appendChild(item);
     });
 }
