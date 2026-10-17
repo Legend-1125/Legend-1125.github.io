@@ -5,7 +5,7 @@
  * (no CORS), and logging in needs a client secret that must never be put in
  * a public website. This small Worker sits in between:
  *
- *   GET  /config               -> { clientId, callbackUrl } for starting a login
+ *   GET  /config               -> { clientId, callbackUrl, siteIndex } for starting a login
  *   GET  /oauth/callback       <- MAL sends the visitor here after they log in;
  *                                 forwards them back to AniZone with the code
  *   POST /oauth/token          { code, code_verifier }  -> MAL tokens
@@ -58,25 +58,25 @@ function json(data, status, origin, env) {
     });
 }
 
-function decodeState(state) {
-    try {
-        const padded = state.replace(/-/g, '+').replace(/_/g, '/');
-        return JSON.parse(atob(padded + '='.repeat((4 - (padded.length % 4)) % 4)));
-    } catch {
-        return null;
-    }
+// The login's "state" is a short code: 20 random letters/digits made by the site,
+// then the position of the site in ALLOWED_ORIGINS (0, 1, ...). MyAnimeList
+// rejects longer or unusual state values, so the return address itself is
+// never put in it.
+const STATE_PATTERN = /^[A-Za-z0-9]{20}(\d{1,2})$/;
+function returnOrigin(state, env) {
+    const match = String(state || '').match(STATE_PATTERN);
+    return match ? allowedOrigins(env)[Number(match[1])] || null : null;
 }
 
-// After logging in on MAL, send the visitor back to the AniZone page they came
-// from, but only if that page belongs to one of the allowed sites.
+// After logging in on MAL, send the visitor back to AniZone, but only to one of
+// the allowed sites.
 function handleCallback(url, env) {
     const state = url.searchParams.get('state') || '';
-    const returnTo = decodeState(state)?.r;
-    let target;
-    try { target = new URL(returnTo); } catch { target = null; }
-    if (!target || !allowedOrigins(env).includes(target.origin)) {
+    const origin = returnOrigin(state, env);
+    if (!origin) {
         return new Response('This login did not start from an allowed AniZone site.', { status: 400, headers: { 'Content-Type': 'text/plain' } });
     }
+    const target = new URL(origin + '/');
     const params = new URLSearchParams({ state });
     for (const key of ['code', 'error', 'error_description']) {
         const value = url.searchParams.get(key);
@@ -148,7 +148,7 @@ export default {
 
         try {
             if (request.method === 'GET' && url.pathname === '/config') {
-                return json({ clientId: env.MAL_CLIENT_ID, callbackUrl: `${url.origin}/oauth/callback`, authorizeUrl: MAL_AUTHORIZE_URL }, 200, origin, env);
+                return json({ clientId: env.MAL_CLIENT_ID, callbackUrl: `${url.origin}/oauth/callback`, authorizeUrl: MAL_AUTHORIZE_URL, siteIndex: allowedOrigins(env).indexOf(origin) }, 200, origin, env);
             }
             if (request.method === 'POST' && url.pathname === '/oauth/token') {
                 const { code, code_verifier } = await readJsonBody(request);

@@ -53,13 +53,10 @@ const MalSync = (() => {
         const bytes = crypto.getRandomValues(new Uint8Array(length));
         return Array.from(bytes, byte => alphabet[byte % alphabet.length]).join('');
     }
-    const base64url = text => btoa(text).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    function decodeState(state) {
-        try {
-            const padded = String(state).replace(/-/g, '+').replace(/_/g, '/');
-            return JSON.parse(atob(padded + '='.repeat((4 - (padded.length % 4)) % 4)));
-        } catch { return null; }
-    }
+    // Login "state": 20 random letters/digits (checked on return) + which allowed
+    // site to come back to. MyAnimeList rejects long or unusual state values.
+    const STATE_NONCE_LENGTH = 20;
+    const stateNonce = state => String(state || '').slice(0, STATE_NONCE_LENGTH);
 
     function toast(message, kind = 'info') {
         let host = $('az-toasts');
@@ -119,10 +116,11 @@ const MalSync = (() => {
             if (!response.ok) throw new Error(await readError(response, 'The relay is not set up correctly.'));
             const config = await response.json();
             const verifier = randomString(64);   // PKCE: MAL only supports the "plain" method (43-128 characters)
-            const nonce = randomString(24);
+            const nonce = randomString(STATE_NONCE_LENGTH);
+            if (!Number.isInteger(config.siteIndex) || config.siteIndex < 0) throw new Error('This site is not in the relay\'s ALLOWED_ORIGINS setting.');
             const back = location.hash && !location.hash.startsWith('#/mal-callback') ? location.hash : '#/';
             write(LOGIN_KEY, { verifier, nonce, back, relay: relayUrl(), startedAt: Date.now() }, sessionStorage);
-            const state = base64url(JSON.stringify({ n: nonce, r: location.origin + location.pathname }));
+            const state = `${nonce}${config.siteIndex}`;
             const params = new URLSearchParams({
                 response_type: 'code',
                 client_id: config.clientId,
@@ -158,7 +156,7 @@ const MalSync = (() => {
             toast(route.error === 'access_denied' ? 'MyAnimeList login cancelled.' : 'MyAnimeList login did not complete.', 'warn');
             return;
         }
-        if (!pending || decodeState(route.state)?.n !== pending.nonce || !route.code) {
+        if (!pending || stateNonce(route.state) !== pending.nonce || !route.code) {
             finish('#/list');
             siteAlert('That MyAnimeList login could not be verified. Please try logging in again from this page.', { title: 'MyAnimeList' });
             return;
