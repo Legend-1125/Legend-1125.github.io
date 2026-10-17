@@ -76,6 +76,15 @@ their browser.
   Dropped, Plan to Watch) with progress bars and a **+1** button, plus your
   AniZone browsing history.
 - Changes made on MyAnimeList itself (or another device) show up on AniZone.
+- **MAL scores** on anime pages come from MyAnimeList's official API through
+  the relay, for every visitor (no login needed). If the relay can't answer,
+  AniZone falls back to Jikan.
+
+## Updating the relay
+
+When `mal-relay.js` changes, open the Worker → **Edit code**, replace
+everything with the new file, and click **Deploy**. Your settings and secret
+stay as they are.
 
 ## Troubleshooting
 

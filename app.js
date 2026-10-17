@@ -353,18 +353,38 @@ async function getJikanAnimeFull(malId, signal) {
     const payload = await jikanRequest(`/anime/${Number(malId)}/full`, { retries: 1, ttl: 24 * 60 * 60 * 1000, signal });
     return payload?.data || null;
 }
-// Returns the MAL score, null when MAL has no score, or throws when Jikan is unreachable.
+// MAL's own API, through the AniZone relay (worker/mal-relay.js). Works without
+// logging in. Returns the score, null when MAL has no score yet, or undefined
+// when the relay can't answer (not set up, older relay version, MAL down).
+const RELAY_SCORE_TIMEOUT_MS = 6000;
+async function fetchMalScoreFromRelay(malId, signal) {
+    const relay = typeof MalSync !== 'undefined' ? MalSync.relayUrl() : '';
+    if (!relay) return undefined;
+    try {
+        const { response, payload } = await fetchJsonWithTimeout(`${relay}/public/anime/${Number(malId)}`, RELAY_SCORE_TIMEOUT_MS, signal);
+        if (response.ok && payload && 'mean' in payload) return typeof payload.mean === 'number' ? payload.mean : null;
+        console.warn('MAL score relay answered', response.status);
+    } catch (error) {
+        if (error.name === 'AbortError') throw error;
+        console.warn('MAL score relay unavailable:', error.message);
+    }
+    return undefined;
+}
+// Returns the MAL score, null when MAL has no score, or throws when no source can answer.
+// Tries MAL's official API (via the relay) first, then Jikan.
 async function fetchMalScore(malId, signal) {
     if (!malId) return null;
     const cached = getCachedMalScore(malId);
     if (cached != null) return cached;
-    let score;
-    try {
-        score = (await getJikanAnimeFull(malId, signal))?.score ?? null;
-    } catch (error) {
-        const staleCompact = jikanCacheRead(`/anime/${Number(malId)}`, true);
-        if (error.name === 'AbortError' || staleCompact?.data?.score == null) throw error;
-        score = staleCompact.data.score;
+    let score = await fetchMalScoreFromRelay(malId, signal);
+    if (score === undefined) {
+        try {
+            score = (await getJikanAnimeFull(malId, signal))?.score ?? null;
+        } catch (error) {
+            const staleCompact = jikanCacheRead(`/anime/${Number(malId)}`, true);
+            if (error.name === 'AbortError' || staleCompact?.data?.score == null) throw error;
+            score = staleCompact.data.score;
+        }
     }
     if (score != null) setCachedMalScore(malId, score);
     return score;

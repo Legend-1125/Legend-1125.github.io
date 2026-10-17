@@ -757,7 +757,71 @@ const MalSync = (() => {
             return;
         }
         grid.innerHTML = '';
-        items.forEach(entry => grid.appendChild(listCard(entry)));
+        const rows = layout === 'list';
+        grid.classList.toggle('mal-rows', rows);
+        items.forEach(entry => grid.appendChild(rows ? listRow(entry) : listCard(entry)));
+    }
+
+    /* Tiles or rows. A per-device preference, like MyAnimeList's own list style. */
+    const LAYOUT_KEY = 'anizone:mylist:layout';
+    let layout = (() => { try { return localStorage.getItem(LAYOUT_KEY) === 'list' ? 'list' : 'grid'; } catch { return 'grid'; } })();
+    function applyLayout() {
+        $('mal-list-grid')?.classList.toggle('mal-rows', layout === 'list');
+        document.querySelectorAll('#mylist-layout [data-layout]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.layout === layout)));
+    }
+    function setLayout(next) {
+        if (next === layout) return;
+        layout = next === 'list' ? 'list' : 'grid';
+        try { localStorage.setItem(LAYOUT_KEY, layout); } catch {}
+        applyLayout();
+        drawMyList();
+    }
+
+    function plusButton(entry, title) {
+        if (entry.status !== 'watching' || (entry.episodes && entry.watched >= entry.episodes)) return null;
+        const plus = document.createElement('button');
+        plus.type = 'button';
+        plus.className = 'mal-card-plus';
+        plus.textContent = '+1';
+        plus.title = `Mark episode ${entry.watched + 1} watched`;
+        plus.setAttribute('aria-label', `Mark episode ${entry.watched + 1} of ${title} watched`);
+        plus.addEventListener('click', () => applyChange(entry.id, { id: entry.id, title: entry.title, titleEn: entry.titleEn, picture: entry.picture, episodes: entry.episodes }, { watched: entry.watched + 1 }));
+        return plus;
+    }
+
+    const SEASON_LABEL = { winter: 'Winter', spring: 'Spring', summer: 'Summer', fall: 'Fall' };
+    function listRow(entry) {
+        const row = document.createElement('div');
+        row.className = `mal-row mal-status-${entry.status}`;
+        const title = displayTitleOf(entry);
+        const otherTitle = [entry.title, entry.titleEn].find(name => name && name !== title) || '';
+        const sub = [
+            TYPES[typeGroup(entry.mediaType)] || '',
+            entry.season?.year ? `${SEASON_LABEL[entry.season.season] || ''} ${entry.season.year}`.trim() : '',
+            AIRING[entry.airing] || '',
+            otherTitle,
+        ].filter(Boolean).join(' · ');
+        const eps = entry.status === 'plan_to_watch' && !entry.watched ? `${entry.episodes || '?'} ep` : `Ep ${progressText(entry)}`;
+        const stat = (label, value) => `<span class="mal-row-stat"><small>${label}</small><b${value ? '' : ' class="empty"'}>${value || '–'}</b></span>`;
+        row.innerHTML = `<a class="mal-row-link" href="#/mal/${entry.id}" title="${escapeHtml(title)}">
+            <img class="mal-row-thumb" src="${escapeHtml(entry.picture || '')}" alt="" loading="lazy">
+            <div class="mal-row-main">
+                <strong class="mal-row-title">${escapeHtml(title)}</strong>
+                ${sub ? `<span class="mal-row-sub">${escapeHtml(sub)}</span>` : ''}
+                <div class="mal-row-progress"><div class="mal-row-bar" aria-hidden="true"><span style="width:${progressPercent(entry)}%"></span></div><span class="mal-row-eps">${escapeHtml(eps)}</span></div>
+            </div>
+            <div class="mal-row-stats">
+                <span class="mal-row-status">${escapeHtml(STATUS_LABEL[entry.status] || '')}</span>
+                ${stat('Mine', entry.score ? `★ ${entry.score}` : '')}
+                ${stat('MAL', entry.mean ? Number(entry.mean).toFixed(2) : '')}
+            </div>
+        </a>`;
+        const action = document.createElement('div');
+        action.className = 'mal-row-action';
+        const plus = plusButton(entry, title);
+        if (plus) action.appendChild(plus);
+        row.appendChild(action);
+        return row;
     }
 
     function listCard(entry) {
@@ -767,16 +831,8 @@ const MalSync = (() => {
         const statusLabel = currentTab === 'all' ? STATUS_LABEL[entry.status] : '';
         const meta = [statusLabel, entry.status === 'plan_to_watch' ? `${entry.episodes || '?'} ep` : `Ep ${progressText(entry)}`, entry.score ? `★ ${entry.score}` : ''].filter(Boolean).join(' · ');
         card.innerHTML = `<a class="anime-card-link" href="#/mal/${entry.id}" title="${escapeHtml(title)}"><img src="${escapeHtml(entry.picture)}" alt="" loading="lazy">${currentTab === 'all' ? `<span class="mal-card-status mal-status-${entry.status}" aria-hidden="true"></span>` : ''}<div class="anime-card-overlay"></div><div class="anime-card-title"><strong class="anime-card-name">${escapeHtml(title)}</strong><span>${escapeHtml(meta)}</span></div><div class="mal-card-progress" aria-hidden="true"><span style="width:${progressPercent(entry)}%"></span></div></a>`;
-        if (entry.status === 'watching' && (!entry.episodes || entry.watched < entry.episodes)) {
-            const plus = document.createElement('button');
-            plus.type = 'button';
-            plus.className = 'mal-card-plus';
-            plus.textContent = '+1';
-            plus.title = `Mark episode ${entry.watched + 1} watched`;
-            plus.setAttribute('aria-label', `Mark episode ${entry.watched + 1} of ${title} watched`);
-            plus.addEventListener('click', () => applyChange(entry.id, { id: entry.id, title: entry.title, titleEn: entry.titleEn, picture: entry.picture, episodes: entry.episodes }, { watched: entry.watched + 1 }));
-            card.appendChild(plus);
-        }
+        const plus = plusButton(entry, title);
+        if (plus) card.appendChild(plus);
         return card;
     }
 
@@ -809,6 +865,8 @@ const MalSync = (() => {
             toggle.setAttribute('aria-expanded', String(open));
             $('mylist-filter-panel')?.classList.toggle('hidden', !open);
         });
+        document.querySelectorAll('#mylist-layout [data-layout]').forEach(button => button.addEventListener('click', () => setLayout(button.dataset.layout)));
+        applyLayout();
     }
 
     function renderActions(loggedIn) {
@@ -903,6 +961,6 @@ const MalSync = (() => {
     // MAL ids on your list (any status), so Surprise Me can suggest something new.
     const listedMalIds = () => new Set(isLoggedIn() ? Object.keys(loadList().entries).map(Number) : []);
 
-    return { renderMyList, renderProgressPanel, handleCallback, openByMalId, refreshViews, startLogin, logout, refreshList, isLoggedIn, isConfigured, listedMalIds };
+    return { renderMyList, renderProgressPanel, handleCallback, openByMalId, refreshViews, startLogin, logout, refreshList, isLoggedIn, isConfigured, listedMalIds, relayUrl };
 })();
 window.MalSync = MalSync;

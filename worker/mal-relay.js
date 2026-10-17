@@ -12,6 +12,8 @@
  *   POST /oauth/refresh        { refresh_token }        -> new MAL tokens
  *   *    /api/<path>           -> https://api.myanimelist.net/v2/<path>
  *                                 (only the few list/profile paths AniZone uses)
+ *   GET  /public/anime/<id>    -> { id, mean, scoringUsers }: an anime's MAL score,
+ *                                 for every visitor, no login needed
  *
  * It stores nothing. Tokens go straight back to the visitor's browser.
  *
@@ -107,6 +109,45 @@ async function exchangeToken(form, origin, env) {
     return json({ access_token, refresh_token, expires_in, token_type }, 200, origin, env);
 }
 
+// MAL scores for anime pages. MAL's official API answers these with just the
+// Client ID, so visitors don't need to log in. Scores barely move, so each one
+// is kept for 6 hours (Cloudflare's cache where available, and the browser's).
+const PUBLIC_TTL_SECONDS = 6 * 60 * 60;
+async function publicAnime(url, origin, env, ctx) {
+    const match = url.pathname.match(/^\/public\/anime\/(\d{1,9})$/);
+    if (!match) return json({ error: 'not_found' }, 404, origin, env);
+    const id = Number(match[1]);
+    const cache = typeof caches !== 'undefined' ? caches.default : null;
+    const cacheKey = new Request(`${url.origin}/public/anime/${id}`);
+    const withCors = (response) => {
+        const headers = new Headers(response.headers);
+        Object.entries(corsHeaders(origin, env)).forEach(([key, value]) => headers.set(key, value));
+        return new Response(response.body, { status: response.status, headers });
+    };
+    try {
+        const hit = cache && await cache.match(cacheKey);
+        if (hit) return withCors(hit);
+    } catch {}
+
+    const upstream = await fetch(`${MAL_API_BASE}anime/${id}?fields=mean,num_scoring_users`, {
+        headers: { 'X-MAL-CLIENT-ID': env.MAL_CLIENT_ID, Accept: 'application/json' },
+    });
+    if (upstream.status !== 200 && upstream.status !== 404) {
+        return json({ error: 'upstream_error', message: `MyAnimeList answered ${upstream.status}.` }, 502, origin, env);
+    }
+    const data = upstream.status === 200 ? await upstream.json() : {};
+    const body = { id, mean: typeof data.mean === 'number' ? data.mean : null, scoringUsers: data.num_scoring_users ?? null };
+    const response = new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${PUBLIC_TTL_SECONDS}`, Vary: 'Origin' },
+    });
+    try {
+        const stored = cache && cache.put(cacheKey, response.clone());
+        if (stored) { if (ctx?.waitUntil) ctx.waitUntil(stored); else await stored; }
+    } catch {}
+    return withCors(response);
+}
+
 async function proxyApi(request, url, origin, env) {
     const path = url.pathname.replace(/^\/api\//, '');
     const rule = API_RULES.find(candidate => candidate.pattern.test(path));
@@ -130,7 +171,7 @@ async function proxyApi(request, url, origin, env) {
 }
 
 export default {
-    async fetch(request, env) {
+    async fetch(request, env, ctx) {
         const url = new URL(request.url);
         const origin = request.headers.get('Origin') || '';
         const fromAllowedSite = allowedOrigins(env).includes(origin);
@@ -161,6 +202,7 @@ export default {
                 return exchangeToken({ grant_type: 'refresh_token', refresh_token }, origin, env);
             }
             if (url.pathname.startsWith('/api/')) return proxyApi(request, url, origin, env);
+            if (request.method === 'GET' && url.pathname.startsWith('/public/')) return publicAnime(url, origin, env, ctx);
             return json({ error: 'not_found' }, 404, origin, env);
         } catch (error) {
             return json({ error: 'relay_error', message: 'The relay could not reach MyAnimeList. Try again in a moment.' }, 502, origin, env);

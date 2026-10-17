@@ -2372,6 +2372,53 @@ html, body { overflow-x: clip; }
 .mylist-count { margin: -2px 0 12px; color: var(--text-muted); font-size: 12px; }
 .mylist-count:empty { display: none; }
 .mal-card-status { position: absolute; top: 8px; left: 8px; z-index: 3; width: 10px; height: 10px; border-radius: 50%; background: var(--mal-status); box-shadow: 0 0 0 2px rgba(0,0,0,.65); }
+
+/* Tiles / list switch, at the right end of the toolbar */
+.mylist-layout { margin-left: auto; display: flex; gap: 2px; padding: 3px; height: 38px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(255,255,255,.06); }
+.mylist-layout-btn { display: grid; place-items: center; width: 38px; border: 0; border-radius: 999px; background: transparent; color: var(--text-muted); cursor: pointer; transition: background .2s, color .2s; }
+.mylist-layout-btn:hover { color: #fff; }
+.mylist-layout-btn:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 1px; }
+.mylist-layout-btn[aria-pressed="true"] { background: var(--accent-red); color: #fff; }
+
+/* My List as rows (like MyAnimeList's list page) */
+.card-grid.mal-rows { display: flex; flex-direction: column; gap: 8px; }
+.mal-row { position: relative; display: flex; align-items: center; min-width: 0; border-radius: 12px; border-left: 3px solid var(--mal-status); background: rgba(255,255,255,.04); transition: background .2s; }
+.mal-row:hover, .mal-row:focus-within { background: rgba(255,255,255,.08); }
+.mal-row-link { flex: 1; min-width: 0; display: grid; grid-template-columns: 50px minmax(0,1fr) auto; grid-template-areas: "thumb main stats"; align-items: center; gap: 14px; padding: 8px 12px 8px 10px; color: inherit; text-decoration: none; }
+.mal-row-link:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: -2px; border-radius: 10px; }
+.mal-row-thumb { grid-area: thumb; width: 50px; height: 70px; object-fit: cover; border-radius: 8px; background: var(--bg-card); }
+.mal-row-main { grid-area: main; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.mal-row-title { overflow: hidden; color: #fff; font-size: 14px; font-weight: 700; line-height: 1.3; white-space: nowrap; text-overflow: ellipsis; }
+.mal-row-sub { overflow: hidden; color: var(--text-muted); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
+.mal-row-progress { display: flex; align-items: center; gap: 10px; max-width: 360px; }
+.mal-row-bar { flex: 1; min-width: 40px; height: 4px; border-radius: 999px; background: rgba(255,255,255,.12); overflow: hidden; }
+.mal-row-bar span { display: block; height: 100%; border-radius: inherit; background: var(--accent-red); }
+.mal-row-eps { flex: 0 0 auto; color: rgba(255,255,255,.85); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.mal-row-stats { grid-area: stats; display: flex; align-items: center; gap: 6px; }
+.mal-row-status { display: inline-flex; align-items: center; gap: 7px; width: 118px; color: rgba(255,255,255,.85); font-size: 12px; font-weight: 600; }
+.mal-row-status::before { content: ''; flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: var(--mal-status); }
+.mal-row-stat { display: flex; flex-direction: column; align-items: center; gap: 1px; width: 70px; }
+.mal-row-stat small { color: var(--text-muted); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.mal-row-stat b { color: #fff; font-size: 14px; font-variant-numeric: tabular-nums; }
+.mal-row-stat b.empty { color: var(--text-muted); font-weight: 500; }
+.mal-row-action { flex: 0 0 56px; display: grid; place-items: center; padding-right: 10px; }
+.mal-row .mal-card-plus { position: static; opacity: 1; }
+@media (max-width: 760px) {
+    .mal-row-link { grid-template-columns: 46px minmax(0,1fr); grid-template-areas: "thumb main" "thumb stats"; row-gap: 6px; column-gap: 12px; }
+    .mal-row-thumb { width: 46px; height: 64px; }
+    .mal-row-stats { gap: 4px 10px; flex-wrap: wrap; }
+    .mal-row-action:empty { display: none; }
+    .mal-row:has(.mal-row-action:empty) .mal-row-link { padding-right: 10px; }
+    .mal-row-status { width: auto; }
+    .mal-row-stat { flex-direction: row; align-items: baseline; gap: 4px; width: auto; }
+    .mal-row-stat b { font-size: 12.5px; }
+    .mal-row-stat small { font-size: 10px; }
+    .mal-row-status { font-size: 11.5px; gap: 6px; }
+    .mal-row-action { flex-basis: 48px; padding-right: 8px; }
+}
+@media (max-width: 480px) {
+    .mylist-toolbar .mylist-sort-group { flex-basis: 100%; }
+}
 @media (max-width: 600px) {
     .mylist-search { max-width: none; flex-basis: 100%; }
     .mylist-sort-group { flex: 1 1 auto; }
