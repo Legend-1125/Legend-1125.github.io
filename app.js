@@ -3075,7 +3075,7 @@ const NEWS_SOURCES = Object.freeze([
     { id: 'crunchyroll', name: 'Crunchyroll News', link: 'https://www.crunchyroll.com/news' },
     { id: 'ann', name: 'Anime News Network', link: 'https://www.animenewsnetwork.com/news/' },
     { id: 'animecorner', name: 'Anime Corner', link: 'https://animecorner.me/category/news/' },
-    { id: 'animeherald', name: 'Anime Herald', link: 'https://www.animeherald.com/' },
+    { id: 'honeysanime', name: "Honey's Anime", link: 'https://honeysanime.com/' },
 ]);
 const NEWS_SOURCE_IDS = new Set(NEWS_SOURCES.map(source => source.id));
 const NEWS_SOURCE_CACHE_VERSION = 'v1';

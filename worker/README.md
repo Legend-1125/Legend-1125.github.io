@@ -81,7 +81,7 @@ their browser.
   AniZone falls back to Jikan.
 
 - **News** from MyAnimeList, Crunchyroll News, Anime News Network, Anime Corner
-  and Anime Herald: the relay reads each site's news feed (no setup needed) and
+  and Honey's Anime: the relay reads each site's news feed (no setup needed) and
   finds a picture for stories whose feed has none. If the relay can't serve
   news, the News page shows MyAnimeList only.
 

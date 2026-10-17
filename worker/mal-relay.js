@@ -251,7 +251,7 @@ const NEWS_SOURCES = {
     crunchyroll: { name: 'Crunchyroll News', feed: 'https://cr-news-api-service.prd.crunchyrollsvc.com/v1/en-US/rss' },
     ann: { name: 'Anime News Network', feed: 'https://www.animenewsnetwork.com/all/rss.xml?ann-edition=us' },
     animecorner: { name: 'Anime Corner', feed: 'https://animecorner.me/feed/' },
-    animeherald: { name: 'Anime Herald', feed: 'https://www.animeherald.com/feed/' },
+    honeysanime: { name: "Honey's Anime", feed: 'https://honeysanime.com/feed/' },
 };
 const NEWS_MAX_ITEMS = 25;
 const NEWS_TTL_SECONDS = 15 * 60;

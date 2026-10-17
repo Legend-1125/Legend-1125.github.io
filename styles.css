@@ -1952,6 +1952,11 @@ body {
     pointer-events: auto;
 }
 .discover-filter-panel .filter-bar { padding: 0; margin: 0; }
+/* A closed Filters panel takes no room. (Squeezed to zero width, its filters used
+   to stack one per line, leaving a tall empty gap above the cards.) */
+.discover-filter-panel:not(.open) { max-height: 0; }
+.discover-filter-panel:not(.open) .filter-pill-group { flex-wrap: nowrap; }
+.discover-filter-shell:has(.discover-filter-panel:not(.open)) { gap: 0; }
 .discover-filter-panel .filter-pill-group { flex-wrap: nowrap; }
 .news-pagination {
     display: flex;
@@ -2476,7 +2481,7 @@ html, body { overflow-x: clip; }
 .news-src-crunchyroll { --news-src:#f47521; }
 .news-src-ann { --news-src:#22c3a6; }
 .news-src-animecorner { --news-src:#ef4c78; }
-.news-src-animeherald { --news-src:#a78bfa; }
+.news-src-honeysanime { --news-src:#f5b301; }
 .news-source-tab.unavailable { opacity:.5; }
 .news-card-body small { display:flex; flex-wrap:wrap; align-items:center; gap:0 4px; color:var(--text-muted); }
 .news-src-label { display:inline-flex; align-items:center; color:rgba(255,255,255,.88); font-weight:700; }
