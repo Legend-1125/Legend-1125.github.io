@@ -18,6 +18,13 @@ const CACHE_TTL = {
     schedule: 10 * 60 * 1000,
 };
 
+// AniList has exactly these 19 genres. Every other entry in the genre menu
+// (Isekai, Shounen, School, ...) is an AniList *tag* and must be queried with tag:.
+const ANILIST_GENRES = new Set(['Action', 'Adventure', 'Comedy', 'Drama', 'Ecchi', 'Fantasy', 'Hentai', 'Horror', 'Mahou Shoujo', 'Mecha', 'Music', 'Mystery', 'Psychological', 'Romance', 'Sci-Fi', 'Slice of Life', 'Sports', 'Supernatural', 'Thriller']);
+// A tag only counts when it describes at least this much of a show (AniList tag rank,
+// 0-100), so "Isekai" returns isekai shows rather than ones with a brief isekai episode.
+const TAG_MIN_RANK = 60;
+
 const HISTORY_KEY = 'anizoneAniListHistory';
 const HISTORY_LIMIT = 100;
 
@@ -99,8 +106,25 @@ let selectedDiscoverSeason = '';
 let selectedDiscoverType = '';
 let selectedDiscoverStatus = '';
 let selectedDiscoverRating = '';
-let selectedSearchYear = '';
-let selectedSearchOrder = 'default';
+// Search filters are separate from Discover and live in the search address
+// (#/search?q=...&genre=...): a new search starts clean, and refresh/Back keep them.
+const SEARCH_FILTER_PARAMS = Object.freeze({ genre: 'genre', year: 'year', season: 'season', type: 'type', status: 'status', rating: 'score', content: 'content', order: 'sort' });
+const SEARCH_FILTER_VALUES = Object.freeze({
+    season: ['WINTER', 'SPRING', 'SUMMER', 'FALL'],
+    type: ['tv', 'movie', 'ova', 'ona', 'special'],
+    status: ['airing', 'complete', 'upcoming'],
+    rating: ['70', '80', '90'],
+    content: ['regular', 'adult', 'both'],
+    order: ['popularity', 'score', 'start_date'],
+});
+function defaultSearchFilters() {
+    return { genre: '', year: '', season: '', type: '', status: '', rating: '', content: '', order: 'default' };
+}
+let searchFilters = defaultSearchFilters();
+let homeDiscoverStale = false;
+function effectiveSearchContent() {
+    return adultContentEnabled ? (searchFilters.content || 'both') : 'regular';
+}
 let resultsPageInfo = null;
 let resultsRequestToken = 0;
 let suggestionController = null;
@@ -234,6 +258,17 @@ const jikanInflight = new Map();
 let jikanQueue = Promise.resolve();
 let lastJikanRequestAt = 0;
 let jikanCooldownUntil = 0;
+// Jikan (the free MyAnimeList API) sometimes goes down or hangs. Each request gets a
+// time limit, and after a failure all Jikan requests pause briefly, so the MAL badge
+// shows "MAL —" within seconds instead of waiting on a line of doomed requests.
+const JIKAN_TIMEOUT_MS = 8000;
+const JIKAN_OUTAGE_PAUSE_MS = 60 * 1000;
+let jikanUnavailableUntil = 0;
+function jikanUnavailableError() {
+    const error = new Error('MyAnimeList data is temporarily unavailable.');
+    error.name = 'JikanUnavailable';
+    return error;
+}
 function jikanCacheRead(path, allowStale = false) {
     try {
         const record = JSON.parse(localStorage.getItem(JIKAN_CACHE_PREFIX + path) || 'null');
@@ -245,58 +280,91 @@ function jikanCacheRead(path, allowStale = false) {
 function jikanCacheWrite(path, value, ttl) {
     try { localStorage.setItem(JIKAN_CACHE_PREFIX + path, JSON.stringify({ value, expiresAt: Date.now() + ttl })); } catch {}
 }
-async function jikanRequest(path, { retries = 1, ttl = JIKAN_DEFAULT_TTL, force = false } = {}) {
+// fetch + JSON with a time limit. An outer signal (leaving the page) cancels it too.
+async function fetchJsonWithTimeout(url, timeoutMs, signal) {
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: controller.signal });
+        let payload = null;
+        try { payload = await response.json(); } catch {}
+        return { response, payload };
+    } catch (error) {
+        if (signal?.aborted) throw abortError();
+        if (error.name === 'AbortError') throw new Error(`Request timed out after ${timeoutMs / 1000}s.`);
+        throw error;
+    } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+    }
+}
+async function jikanRequest(path, { retries = 1, ttl = JIKAN_DEFAULT_TTL, force = false, signal } = {}) {
     if (!force) {
         const cached = jikanCacheRead(path);
         if (cached) return cached;
     }
+    if (Date.now() < jikanUnavailableUntil) {
+        const stale = jikanCacheRead(path, true);
+        if (stale) return stale;
+        throw jikanUnavailableError();
+    }
     if (jikanInflight.has(path)) return jikanInflight.get(path);
     const task = jikanQueue = jikanQueue.catch(() => {}).then(async () => {
+        if (signal?.aborted) throw abortError();
         const stale = jikanCacheRead(path, true);
         let lastError = null;
         for (let attempt = 0; attempt <= retries; attempt++) {
+            if (Date.now() < jikanUnavailableUntil) { lastError = jikanUnavailableError(); break; }
             try {
                 const wait = Math.max(0, jikanCooldownUntil - Date.now(), 1250 - (Date.now() - lastJikanRequestAt));
-                if (wait) await delay(wait);
+                if (wait) await delay(wait, signal);
                 lastJikanRequestAt = Date.now();
-                const response = await fetch(`${JIKAN_API}${path}`, { headers: { Accept: 'application/json' } });
-                let payload = null;
-                try { payload = await response.json(); } catch {}
+                const { response, payload } = await fetchJsonWithTimeout(`${JIKAN_API}${path}`, JIKAN_TIMEOUT_MS, signal);
                 if (response.ok) { jikanCacheWrite(path, payload, ttl); return payload; }
                 const retryAfter = Number(response.headers.get('Retry-After')) || Math.min(12, 2 ** (attempt + 1));
                 if (response.status === 429) jikanCooldownUntil = Date.now() + retryAfter * 1000;
                 lastError = new Error(response.status === 429 ? 'Extra MyAnimeList data is temporarily rate-limited.' : (payload?.message || `Jikan request failed (${response.status}).`));
-                if ((response.status === 429 || response.status >= 500) && attempt < retries) { await delay(retryAfter * 1000); continue; }
+                if ((response.status === 429 || response.status >= 500) && attempt < retries) { await delay(retryAfter * 1000, signal); continue; }
                 break;
             } catch (error) {
-                lastError = error;
-                if (attempt < retries) { await delay((attempt + 1) * 1200); continue; }
+                if (error.name === 'AbortError') throw error;
+                // No response at all (network error, CORS-less error page, or time limit):
+                // Jikan itself is unreachable, so stop asking for a minute.
+                jikanUnavailableUntil = Date.now() + JIKAN_OUTAGE_PAUSE_MS;
+                console.warn('Jikan unavailable:', error.message);
+                lastError = jikanUnavailableError();
+                break;
             }
         }
         if (stale) return stale;
-        throw lastError || new Error('Unable to load extra MyAnimeList data.');
-    }).finally(() => jikanInflight.delete(path));
+        throw lastError || jikanUnavailableError();
+    }).finally(() => { if (jikanInflight.get(path) === task) jikanInflight.delete(path); });
     jikanInflight.set(path, task);
+    signal?.addEventListener('abort', () => {
+        if (jikanInflight.get(path) === task) jikanInflight.delete(path);
+    }, { once: true });
     return task;
 }
-async function getJikanAnimeFull(malId) {
+// One /full request supplies both the MAL score and the theme songs.
+async function getJikanAnimeFull(malId, signal) {
     if (!malId) return null;
-    const payload = await jikanRequest(`/anime/${Number(malId)}/full`, { retries: 0, ttl: 24 * 60 * 60 * 1000 });
+    const payload = await jikanRequest(`/anime/${Number(malId)}/full`, { retries: 1, ttl: 24 * 60 * 60 * 1000, signal });
     return payload?.data || null;
 }
-async function fetchMalScore(malId) {
+// Returns the MAL score, null when MAL has no score, or throws when Jikan is unreachable.
+async function fetchMalScore(malId, signal) {
     if (!malId) return null;
     const cached = getCachedMalScore(malId);
     if (cached != null) return cached;
-
-    let score = null;
+    let score;
     try {
-            const payload = await jikanRequest(`/anime/${Number(malId)}`, { retries: 1, ttl: 24 * 60 * 60 * 1000 });
-            score = payload?.data?.score ?? null;
-    } catch {
+        score = (await getJikanAnimeFull(malId, signal))?.score ?? null;
+    } catch (error) {
         const staleCompact = jikanCacheRead(`/anime/${Number(malId)}`, true);
-        const staleFull = jikanCacheRead(`/anime/${Number(malId)}/full`, true);
-        score = staleCompact?.data?.score ?? staleFull?.data?.score ?? null;
+        if (error.name === 'AbortError' || staleCompact?.data?.score == null) throw error;
+        score = staleCompact.data.score;
     }
     if (score != null) setCachedMalScore(malId, score);
     return score;
@@ -484,7 +552,7 @@ async function getTopRated(page = 1, perPage = PAGE_SIZE) {
     const query = mediaPageQuery('', `, sort: SCORE_DESC${adultArgument()}`);
     return aniRequest(query, { page, perPage }, { cacheKey: `top:${adultContentEnabled}:${page}:${perPage}`, ttl: CACHE_TTL.top });
 }
-function buildMediaPageRequest({ page = 1, perPage = PAGE_SIZE, filters = {}, sort = null, cachePrefix = 'media', ttl = CACHE_TTL.search, signal } = {}) {
+function buildMediaPageRequest({ page = 1, perPage = PAGE_SIZE, filters = {}, sort = null, cachePrefix = 'media', ttl = CACHE_TTL.search, signal, priority = 'normal' } = {}) {
     const variableDefs = ['$page: Int!', '$perPage: Int!'];
     const mediaArgs = ['type: ANIME'];
     const variables = { page, perPage };
@@ -499,7 +567,12 @@ function buildMediaPageRequest({ page = 1, perPage = PAGE_SIZE, filters = {}, so
     addVariable('search', 'String', filters.search);
     addVariable('season', 'MediaSeason', filters.season ? String(filters.season).toUpperCase() : null);
     addVariable('seasonYear', 'Int', filters.year ? Number(filters.year) : null);
-    addVariable('genre', 'String', filters.genre);
+    if (filters.genre && ANILIST_GENRES.has(filters.genre)) {
+        addVariable('genre', 'String', filters.genre);
+    } else if (filters.genre) {
+        addVariable('tag', 'String', filters.genre);
+        addVariable('minimumTagRank', 'Int', TAG_MIN_RANK);
+    }
     addVariable('format', 'MediaFormat', formatVariable(filters.type));
     addVariable('status', 'MediaStatus', statusVariable(filters.status));
     addVariable('minimumScore', 'Int', minimumScore(filters.rating), 'averageScore_greater');
@@ -523,7 +596,7 @@ function buildMediaPageRequest({ page = 1, perPage = PAGE_SIZE, filters = {}, so
         }
     }`;
     const cacheKey = `${cachePrefix}:${adultContentEnabled}:${JSON.stringify(variables)}`;
-    return aniRequest(query, variables, { cacheKey, ttl, signal });
+    return aniRequest(query, variables, { cacheKey, ttl, signal, priority });
 }
 
 async function getDiscover(page = 1, perPage = PAGE_SIZE) {
@@ -697,12 +770,24 @@ function parseRoute(hash = location.hash) {
     if (section === 'anime' && numericId) return { name: 'anime', id: numericId };
     if (section === 'search') {
         const query = (params.get('q') || '').trim();
-        return query ? { name: 'search', query, page } : { name: 'not-found' };
+        return query ? { name: 'search', query, page, filters: readSearchFilters(params) } : { name: 'not-found' };
     }
     if (section === 'browse' && BROWSE_TARGETS.has(id)) return { name: 'browse', target: id, page };
     if (section === 'studio' && numericId) return { name: 'studio', id: numericId, studioName: params.get('name') || '', page };
     if (['list', 'schedule', 'news'].includes(section) && segments.length === 1) return { name: section };
     return { name: 'not-found' };
+}
+
+function readSearchFilters(params) {
+    const filters = defaultSearchFilters();
+    Object.entries(SEARCH_FILTER_PARAMS).forEach(([key, param]) => {
+        const value = (params.get(param) || '').trim();
+        if (!value) return;
+        if (key === 'genre') filters.genre = value.slice(0, 60);
+        else if (key === 'year') { if (/^\d{4}$/.test(value)) filters.year = value; }
+        else if (SEARCH_FILTER_VALUES[key]?.includes(value)) filters[key] = value;
+    });
+    return filters;
 }
 
 function navigate(hash, { replace = false } = {}) {
@@ -779,6 +864,11 @@ function renderRoute({ fresh = false } = {}) {
         case 'home':
             setPageTitle();
             showView('view-home');
+            if (homeDiscoverStale) {
+                homeDiscoverStale = false;
+                syncHomeDiscoverControls();
+                refreshDiscoverRow();
+            }
             restorePendingScroll();
             break;
         case 'list':
@@ -810,10 +900,7 @@ function renderRoute({ fresh = false } = {}) {
 
 function showResultsRoute(route) {
     if (route.name === 'search') {
-        if (currentActiveRowTarget !== 'search' || currentSearchQuery !== route.query) {
-            selectedSearchYear = '';
-            selectedSearchOrder = 'default';
-        }
+        searchFilters = route.filters;
         currentSearchQuery = route.query;
         currentActiveRowTarget = 'search';
         if (searchInput && document.activeElement !== searchInput) searchInput.value = route.query;
@@ -836,7 +923,14 @@ function showResultsRoute(route) {
 }
 
 function resultsRouteHash(page = currentPage) {
-    if (currentActiveRowTarget === 'search') return routeHash('/search', { q: currentSearchQuery, page });
+    if (currentActiveRowTarget === 'search') {
+        const params = { q: currentSearchQuery };
+        Object.entries(SEARCH_FILTER_PARAMS).forEach(([key, param]) => {
+            const value = searchFilters[key];
+            if (value && !(key === 'order' && value === 'default')) params[param] = value;
+        });
+        return routeHash('/search', { ...params, page });
+    }
     if (currentActiveRowTarget === 'studio') return studioHash(selectedStudioId, selectedStudioName, page);
     return routeHash(`/browse/${currentActiveRowTarget}`, { page });
 }
@@ -1041,20 +1135,28 @@ async function fetchSearchSuggestions(queryText) {
 }
 
 async function getDashboardBundle() {
-    const seasonArgs = selectedDiscoverSeason ? ', season: $season' : '';
-    const yearArgs = selectedDiscoverYear ? ', seasonYear: $seasonYear' : '';
-    const genreArgs = selectedDiscoverGenre ? ', genre: $genre' : '';
-    const query = `query ($perPage: Int!${selectedDiscoverSeason ? ', $season: MediaSeason' : ''}${selectedDiscoverYear ? ', $seasonYear: Int' : ''}${selectedDiscoverGenre ? ', $genre: String' : ''}) {
+    const discoverDefs = [];
+    const discoverArgs = [];
+    const variables = { perPage: 20 };
+    const addDiscover = (name, type, value, argument = name) => {
+        discoverDefs.push(`, $${name}: ${type}`);
+        discoverArgs.push(`, ${argument}: $${name}`);
+        variables[name] = value;
+    };
+    if (selectedDiscoverSeason) addDiscover('season', 'MediaSeason', selectedDiscoverSeason);
+    if (selectedDiscoverYear) addDiscover('seasonYear', 'Int', Number(selectedDiscoverYear));
+    if (selectedDiscoverGenre && ANILIST_GENRES.has(selectedDiscoverGenre)) addDiscover('genre', 'String', selectedDiscoverGenre);
+    else if (selectedDiscoverGenre) {
+        addDiscover('tag', 'String', selectedDiscoverGenre);
+        addDiscover('minimumTagRank', 'Int', TAG_MIN_RANK);
+    }
+    const query = `query ($perPage: Int!${discoverDefs.join('')}) {
         trending: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: TRENDING_DESC${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
         top: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: SCORE_DESC${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
-        discover: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: POPULARITY_DESC${seasonArgs}${yearArgs}${genreArgs}${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
+        discover: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: POPULARITY_DESC${discoverArgs.join('')}${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
     }`;
-    const variables = { perPage: 20 };
-    if (selectedDiscoverSeason) variables.season = selectedDiscoverSeason;
-    if (selectedDiscoverYear) variables.seasonYear = Number(selectedDiscoverYear);
-    if (selectedDiscoverGenre) variables.genre = selectedDiscoverGenre;
     return aniRequest(query, variables, {
-        cacheKey: `dashboard:${adultContentEnabled}:${selectedDiscoverSeason}:${selectedDiscoverYear}:${selectedDiscoverGenre}`,
+        cacheKey: `dashboard:v2:${adultContentEnabled}:${selectedDiscoverSeason}:${selectedDiscoverYear}:${selectedDiscoverGenre}`,
         ttl: CACHE_TTL.trending,
         priority: 'interactive',
     });
@@ -1233,22 +1335,40 @@ function populateYearFilterOptions() {
     select.innerHTML = options;
 }
 function syncDiscoverAdultFilter() {
-    const selects = [
-        document.getElementById('discover-adult-filter'),
-        document.getElementById('grid-discover-adult'),
-    ].filter(Boolean);
     if (!adultContentEnabled) {
         selectedDiscoverAdult = 'regular';
         localStorage.setItem('anizoneDiscoverAdultMode', selectedDiscoverAdult);
     }
-    selects.forEach(select => {
+    const gridValue = currentActiveRowTarget === 'search' ? effectiveSearchContent() : selectedDiscoverAdult;
+    [
+        [document.getElementById('discover-adult-filter'), selectedDiscoverAdult],
+        [document.getElementById('grid-discover-adult'), gridValue],
+    ].forEach(([select, value]) => {
+        if (!select) return;
         select.disabled = !adultContentEnabled;
-        select.value = selectedDiscoverAdult;
+        select.value = value;
         select.classList.toggle('hidden', !adultContentEnabled);
         const wrapper = select.closest('.az-select');
         wrapper?.classList.toggle('hidden', !adultContentEnabled);
         wrapper?.classList.toggle('adult-filter-active', adultContentEnabled);
         select._azRebuild?.();
+    });
+}
+
+// Shows the current Discover filter values in the Home page's dropdowns.
+function syncHomeDiscoverControls() {
+    const values = {
+        'home-filter-genre': selectedDiscoverGenre,
+        'filter-year': selectedDiscoverYear,
+        'filter-season': selectedDiscoverSeason,
+        'discover-type': selectedDiscoverType,
+        'discover-status': selectedDiscoverStatus,
+        'discover-rating': selectedDiscoverRating,
+        'discover-adult-filter': selectedDiscoverAdult,
+    };
+    Object.entries(values).forEach(([id, value]) => {
+        const select = document.getElementById(id);
+        if (select) { select.value = value; select._azRebuild?.(); }
     });
 }
 
@@ -1261,14 +1381,7 @@ function resetDiscoverFilters() {
     selectedDiscoverRating = '';
     selectedDiscoverAdult = adultContentEnabled ? 'both' : 'regular';
     localStorage.setItem('anizoneDiscoverAdultMode', selectedDiscoverAdult);
-    document.getElementById('home-filter-genre').value = '';
-    document.getElementById('filter-year').value = selectedDiscoverYear;
-    document.getElementById('filter-season').value = selectedDiscoverSeason;
-    document.getElementById('discover-type').value = '';
-    document.getElementById('discover-status').value = '';
-    document.getElementById('discover-rating').value = '';
-    const adultFilter = document.getElementById('discover-adult-filter');
-    if (adultFilter) adultFilter.value = selectedDiscoverAdult;
+    syncHomeDiscoverControls();
     refreshDiscoverRow();
 }
 async function refreshDiscoverRow() {
@@ -1291,32 +1404,50 @@ function initSliders() {
         container.querySelector('.right-arrow')?.addEventListener('click', () => track?.scrollBy({ left: 500, behavior: 'smooth' }));
     });
 }
-function syncGridDiscoverFilters() {
-    const sourceGenre = document.getElementById('home-filter-genre');
-    const sourceYear = document.getElementById('filter-year');
-    const gridYearValue = currentActiveRowTarget === 'search' ? selectedSearchYear : selectedDiscoverYear;
-    const pairs = [
-        ['grid-discover-genre', sourceGenre, selectedDiscoverGenre],
-        ['grid-discover-year', sourceYear, gridYearValue],
-    ];
-    pairs.forEach(([id, source, value]) => {
-        const target = document.getElementById(id);
-        if (!target || !source) return;
-        if (target.options.length !== source.options.length) target.innerHTML = source.innerHTML;
-        target.value = value;
-        target._azRebuild?.();
-    });
-    const values = {
-        'grid-discover-season': selectedDiscoverSeason,
-        'grid-discover-type': selectedDiscoverType,
-        'grid-discover-status': selectedDiscoverStatus,
-        'grid-discover-rating': selectedDiscoverRating,
-        'grid-discover-adult': selectedDiscoverAdult,
-        'grid-search-order': selectedSearchOrder,
+// The filter bar on the grid page serves both Discover and Search; each keeps its own values.
+function gridFilterValues() {
+    if (currentActiveRowTarget === 'search') return { ...searchFilters, content: effectiveSearchContent() };
+    return {
+        genre: selectedDiscoverGenre, year: selectedDiscoverYear, season: selectedDiscoverSeason,
+        type: selectedDiscoverType, status: selectedDiscoverStatus, rating: selectedDiscoverRating,
+        content: selectedDiscoverAdult, order: 'default',
     };
-    Object.entries(values).forEach(([id, value]) => {
+}
+function setGridFilter(key, value) {
+    if (currentActiveRowTarget === 'search') {
+        searchFilters = { ...searchFilters, [key]: value };
+        return;
+    }
+    homeDiscoverStale = true;
+    if (key === 'genre') selectedDiscoverGenre = value;
+    else if (key === 'year') selectedDiscoverYear = value;
+    else if (key === 'season') selectedDiscoverSeason = value;
+    else if (key === 'type') selectedDiscoverType = value;
+    else if (key === 'status') selectedDiscoverStatus = value;
+    else if (key === 'rating') selectedDiscoverRating = value;
+    else if (key === 'content') { selectedDiscoverAdult = value; localStorage.setItem('anizoneDiscoverAdultMode', value); }
+}
+const GRID_FILTER_SELECTS = Object.freeze({
+    'grid-discover-genre': 'genre',
+    'grid-discover-year': 'year',
+    'grid-discover-season': 'season',
+    'grid-discover-type': 'type',
+    'grid-discover-status': 'status',
+    'grid-discover-rating': 'rating',
+    'grid-discover-adult': 'content',
+    'grid-search-order': 'order',
+});
+
+function syncGridDiscoverFilters() {
+    const values = gridFilterValues();
+    [['grid-discover-genre', 'home-filter-genre'], ['grid-discover-year', 'filter-year']].forEach(([id, sourceId]) => {
+        const target = document.getElementById(id);
+        const source = document.getElementById(sourceId);
+        if (target && source && target.options.length !== source.options.length) target.innerHTML = source.innerHTML;
+    });
+    Object.entries(GRID_FILTER_SELECTS).forEach(([id, key]) => {
         const select = document.getElementById(id);
-        if (select) { select.value = value; select._azRebuild?.(); }
+        if (select) { select.value = values[key]; select._azRebuild?.(); }
     });
     syncDiscoverAdultFilter();
     const searchOrder = document.getElementById('grid-search-order');
@@ -1332,42 +1463,19 @@ function initGridDiscoverFilters() {
         toggle.setAttribute('aria-expanded', String(!open));
         panel?.classList.toggle('open', !open);
     });
-    const bindings = {
-        'grid-discover-genre': value => selectedDiscoverGenre = value,
-        'grid-discover-year': value => {
-            if (currentActiveRowTarget === 'search') selectedSearchYear = value;
-            else selectedDiscoverYear = value;
-        },
-        'grid-discover-season': value => selectedDiscoverSeason = value,
-        'grid-discover-type': value => selectedDiscoverType = value,
-        'grid-discover-status': value => selectedDiscoverStatus = value,
-        'grid-discover-rating': value => selectedDiscoverRating = value,
-        'grid-discover-adult': value => { selectedDiscoverAdult = value; localStorage.setItem('anizoneDiscoverAdultMode', value); },
-        'grid-search-order': value => selectedSearchOrder = value,
-    };
-    Object.entries(bindings).forEach(([id, setter]) => document.getElementById(id)?.addEventListener('change', event => {
-        setter(event.target.value);
+    Object.entries(GRID_FILTER_SELECTS).forEach(([id, key]) => document.getElementById(id)?.addEventListener('change', event => {
+        setGridFilter(key, event.target.value);
         currentPage = 1;
         syncResultsUrl();
-        syncGridDiscoverFilters();
+        configureResultsHeader(currentActiveRowTarget);
         fetchExpandedGridData();
     }));
     document.getElementById('grid-reset-discover-filters')?.addEventListener('click', () => {
-        if (currentActiveRowTarget === 'search') {
-            selectedDiscoverGenre = '';
-            selectedSearchYear = '';
-            selectedDiscoverSeason = '';
-            selectedDiscoverType = '';
-            selectedDiscoverStatus = '';
-            selectedDiscoverRating = '';
-            selectedDiscoverAdult = adultContentEnabled ? 'both' : 'regular';
-            selectedSearchOrder = 'default';
-        } else {
-            resetDiscoverFilters();
-        }
-        syncGridDiscoverFilters();
+        if (currentActiveRowTarget === 'search') searchFilters = defaultSearchFilters();
+        else resetDiscoverFilters();
         currentPage = 1;
         syncResultsUrl();
+        configureResultsHeader(currentActiveRowTarget);
         fetchExpandedGridData();
     });
 }
@@ -1399,14 +1507,8 @@ async function fetchExpandedGridData() {
     showLoading(true);
     grid.innerHTML = '<div class="spinner"></div>';
     const filters = currentActiveRowTarget === 'search' ? {
-        genre: selectedDiscoverGenre,
-        year: selectedSearchYear,
-        season: selectedDiscoverSeason,
-        type: selectedDiscoverType,
-        status: selectedDiscoverStatus,
-        rating: selectedDiscoverRating,
-        adultMode: adultContentEnabled ? selectedDiscoverAdult : 'regular',
-        order: selectedSearchOrder,
+        ...searchFilters,
+        adultMode: effectiveSearchContent(),
     } : {
         type: document.getElementById('filter-type')?.value || '',
         status: document.getElementById('filter-status')?.value || '',
@@ -1558,6 +1660,7 @@ function renderAnimeDetails(anime) {
     const malBadge = document.getElementById('badge-mal-score');
     if (malBadge) {
         malBadge.textContent = anime.idMal ? 'MAL …' : 'MAL N/A';
+        malBadge.title = anime.idMal ? 'Loading MyAnimeList score…' : '';
         malBadge.classList.toggle('hidden', !anime.idMal);
     }
     loadMalScoreIntoDetails(anime);
@@ -1574,14 +1677,14 @@ async function loadMalScoreIntoDetails(anime) {
     const badge = document.getElementById('badge-mal-score');
     if (!badge || !anime?.idMal) return;
     try {
-        const score = await fetchMalScore(anime.idMal);
-        if (currentDetailAnime?.id !== anime.id) return;
+        const score = await fetchMalScore(anime.idMal, detailSignal());
+        if (!isCurrentDetail(anime)) return;
         badge.textContent = score != null ? `★ MAL ${Number(score).toFixed(2)}` : 'MAL N/A';
+        badge.title = score != null ? 'MyAnimeList score' : 'MyAnimeList has no score for this title yet.';
     } catch (error) {
-        if (currentDetailAnime?.id !== anime.id) return;
+        if (error.name === 'AbortError' || !isCurrentDetail(anime)) return;
         badge.textContent = 'MAL —';
-        badge.title = 'MAL score is temporarily unavailable.';
-        console.warn('MAL score lookup failed:', error);
+        badge.title = 'MyAnimeList scores are temporarily unavailable. Try again in a minute.';
     }
 }
 
@@ -2357,12 +2460,12 @@ async function fetchThemes(anime){
     if(!anime.idMal){box.innerHTML='<div class="empty-state">No MAL entry is available for theme-song data.</div>';return;}
     box.innerHTML='<div class="spinner"></div>';
     try{
-        const full=await getJikanAnimeFull(anime.idMal);
+        const full=await getJikanAnimeFull(anime.idMal, detailSignal());
         if(!isCurrentDetail(anime))return;
         const theme=full?.theme||{};
         const rows=[...(theme.openings||[]).map(x=>['Opening',x]),...(theme.endings||[]).map(x=>['Ending',x])];
         box.innerHTML=rows.length?rows.map(([kind,title])=>`<div class="music-item"><div><strong>${kind}</strong><small>${escapeHtml(title)}</small></div><a class="see-more-btn" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${encodeURIComponent(`${title} ${displayTitle(anime)}`)}">Search</a></div>`).join(''):'<div class="empty-state">No opening or ending songs are listed for this title.</div>';
-    }catch(e){if(!isCurrentDetail(anime))return;box.innerHTML='<div class="empty-state"><strong>Theme songs are temporarily unavailable.</strong></div>';}
+    }catch(e){if(e.name==='AbortError'||!isCurrentDetail(anime))return;box.innerHTML='<div class="empty-state"><strong>Theme songs are temporarily unavailable.</strong><span>They come from MyAnimeList, which isn\'t responding right now.</span></div>';}
 }
 let newsPage = 1;
 const NEWS_PAGE_SIZE = 15;
