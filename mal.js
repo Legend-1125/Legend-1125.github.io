@@ -18,11 +18,11 @@ const MalSync = (() => {
     const RELAY_KEY = 'anizone:mal:relay:v1';
     const AUTH_KEY = 'anizone:mal:auth:v1';
     const PROFILE_KEY = 'anizone:mal:profile:v1';
-    const LIST_KEY = 'anizone:mal:list:v1';
+    const LIST_KEY = 'anizone:mal:list:v2';   // v2 adds genres, season, airing and MAL score
     const LOGIN_KEY = 'anizone:mal:login:v1';           // sessionStorage, survives the trip to MAL and back
     const LIST_FRESH_MS = 2 * 60 * 1000;
     const SAVE_DELAY_MS = 700;                           // group quick +/- clicks into one save
-    const LIST_FIELDS = 'list_status,num_episodes,nsfw,media_type,status,alternative_titles';
+    const LIST_FIELDS = 'list_status,num_episodes,nsfw,media_type,status,alternative_titles,genres,start_season,mean';
 
     const STATUSES = Object.freeze([
         ['watching', 'Watching'],
@@ -252,6 +252,10 @@ const MalSync = (() => {
             episodes: Number(node.num_episodes) || 0,
             nsfw: node.nsfw || 'white',
             mediaType: node.media_type || '',
+            airing: node.status || '',
+            genres: (node.genres || []).map(genre => genre.name).filter(Boolean),
+            season: node.start_season?.year ? { year: Number(node.start_season.year), season: node.start_season.season || '' } : null,
+            mean: Number(node.mean) || 0,
             ...statusFields(listStatus),
         };
     }
@@ -362,7 +366,12 @@ const MalSync = (() => {
     }
 
     function newEntry(info) {
-        return { id: info.id, title: info.title, titleEn: info.titleEn, picture: info.picture, episodes: info.episodes || 0, nsfw: info.isAdult ? 'black' : 'white', mediaType: info.mediaType || '', status: '', score: 0, watched: 0, rewatching: false, updatedAt: new Date().toISOString() };
+        return {
+            id: info.id, title: info.title, titleEn: info.titleEn, picture: info.picture, episodes: info.episodes || 0,
+            nsfw: info.isAdult ? 'black' : 'white', mediaType: info.mediaType || '', airing: info.airing || '',
+            genres: info.genres || [], season: info.season || null, mean: info.mean || 0,
+            status: '', score: 0, watched: 0, rewatching: false, updatedAt: new Date().toISOString(),
+        };
     }
 
     // Applies a change the way MAL's own site does:
@@ -371,7 +380,7 @@ const MalSync = (() => {
     // - marking it Completed fills in all episodes
     function applyChange(malId, info, change) {
         const prior = getEntry(malId);
-        const before = prior || newEntry(info);
+        const before = prior || { ...newEntry(info), ...(malDetails.get(malId) || {}) };
         const total = before.episodes || info.episodes || 0;
         const next = { ...before, episodes: total, updatedAt: new Date().toISOString() };
         const changes = {};
@@ -415,6 +424,19 @@ const MalSync = (() => {
     /* ---------- anime page: progress panel ---------- */
     let panelAnime = null;
     const saveStates = new Map(); // malId -> { state, error, retry }
+    // MAL's own details for anime opened this visit, so a title added from its page
+    // sorts and filters (genres, MAL score, season) like the rest of the list.
+    const malDetails = new Map();
+    const DETAIL_FIELDS = 'my_list_status,num_episodes,mean,genres,start_season,media_type,status';
+    function detailsFromNode(node) {
+        return {
+            mean: Number(node.mean) || 0,
+            genres: (node.genres || []).map(genre => genre.name).filter(Boolean),
+            season: node.start_season?.year ? { year: Number(node.start_season.year), season: node.start_season.season || '' } : null,
+            mediaType: node.media_type || '',
+            airing: node.status || '',
+        };
+    }
 
     function infoFromAnime(anime) {
         return {
@@ -424,7 +446,10 @@ const MalSync = (() => {
             picture: anime.coverImage?.large || anime.coverImage?.extraLarge || '',
             episodes: anime.episodes || 0,
             isAdult: anime.isAdult,
-            mediaType: (anime.format || '').toLowerCase(),
+            mediaType: ({ TV: 'tv', TV_SHORT: 'tv', MOVIE: 'movie', OVA: 'ova', ONA: 'ona', SPECIAL: 'special', MUSIC: 'music' })[anime.format] || '',
+            airing: ({ RELEASING: 'currently_airing', FINISHED: 'finished_airing', NOT_YET_RELEASED: 'not_yet_aired' })[anime.status] || '',
+            genres: anime.genres || [],
+            season: anime.seasonYear ? { year: anime.seasonYear, season: (anime.season || '').toLowerCase() } : null,
         };
     }
 
@@ -437,18 +462,23 @@ const MalSync = (() => {
             return;
         }
         if (!isConfigured() || !isLoggedIn()) {
-            box.innerHTML = `<div class="mal-progress-card mal-progress-login"><span class="mal-badge">MAL</span><span>Track your progress on MyAnimeList</span><button class="btn-secondary" type="button" data-mal-action="login">${isConfigured() ? 'Log in with MyAnimeList' : 'Set up MyAnimeList'}</button></div>`;
+            box.innerHTML = `<section class="mal-progress-panel" aria-labelledby="mal-progress-title">
+                <div class="mal-progress-top"><h3 class="mal-progress-title" id="mal-progress-title">My progress</h3></div>
+                <div class="mal-progress-cta"><span>Track episodes, status and your score on MyAnimeList.</span>
+                <button class="mal-pill-btn" type="button" data-mal-action="login">${isConfigured() ? 'Log in with MyAnimeList' : 'Set up MyAnimeList'}</button></div>
+            </section>`;
             box.querySelector('[data-mal-action="login"]').addEventListener('click', () => isConfigured() ? startLogin() : openSettings());
             return;
         }
         drawPanel();
         // Pick up changes made on MyAnimeList itself (or another device).
         const malId = anime.idMal;
-        malApi(`anime/${malId}?fields=my_list_status,num_episodes`).then(data => {
+        malApi(`anime/${malId}?fields=${DETAIL_FIELDS}`).then(data => {
+            if (data) malDetails.set(malId, detailsFromNode(data));
             if (panelAnime?.idMal !== malId || saves.has(malId)) return;
             const current = getEntry(malId);
             if (data?.my_list_status) {
-                const merged = { ...(current || newEntry(infoFromAnime(anime))), episodes: Number(data.num_episodes) || current?.episodes || anime.episodes || 0, ...statusFields(data.my_list_status) };
+                const merged = { ...(current || newEntry(infoFromAnime(anime))), ...malDetails.get(malId), episodes: Number(data.num_episodes) || current?.episodes || anime.episodes || 0, ...statusFields(data.my_list_status) };
                 putEntry(malId, merged);
             } else if (current) {
                 putEntry(malId, null);
@@ -468,34 +498,42 @@ const MalSync = (() => {
         const total = entry?.episodes || info.episodes || 0;
         const watched = entry?.watched || 0;
         const status = entry?.status || '';
-        const focused = document.activeElement?.dataset?.mal;
-        box.innerHTML = `<div class="mal-progress-card">
-            <div class="mal-progress-head"><span class="mal-badge">MAL</span><strong>My progress</strong><span class="mal-save-state" data-mal-state aria-live="polite"></span></div>
-            <div class="mal-progress-row">
-                <label class="mal-field"><span>Status</span><select data-mal="status">
-                    <option value="">Not on my list</option>
-                    ${STATUSES.map(([value, label]) => `<option value="${value}"${value === status ? ' selected' : ''}>${label}</option>`).join('')}
-                </select></label>
-                <div class="mal-field"><span id="mal-episodes-label">Episodes</span>
-                    <div class="mal-episodes" role="group" aria-labelledby="mal-episodes-label">
-                        <button type="button" data-mal="minus" aria-label="One episode fewer"${watched <= 0 ? ' disabled' : ''}>−</button>
-                        <input data-mal="episodes" type="number" inputmode="numeric" min="0"${total ? ` max="${total}"` : ''} value="${watched}" aria-label="Episodes watched">
-                        <span class="mal-total">/ ${total || '?'}</span>
-                        <button type="button" data-mal="plus" aria-label="One more episode"${total && watched >= total ? ' disabled' : ''}>+</button>
-                    </div>
-                </div>
-                <label class="mal-field"><span>Score</span><select data-mal="score">
-                    ${SCORE_LABELS.map((label, value) => `<option value="${value}"${value === (entry?.score || 0) ? ' selected' : ''}>${value ? `${value} · ${label}` : label}</option>`).reverse().join('')}
-                </select></label>
+        const score = entry?.score || 0;
+        const focused = document.activeElement?.closest?.('#mal-progress [data-mal-focus]')?.dataset.malFocus;
+        box.innerHTML = `<section class="mal-progress-panel" aria-labelledby="mal-progress-title">
+            <div class="mal-progress-top">
+                <h3 class="mal-progress-title" id="mal-progress-title">My progress</h3>
+                <span class="mal-save-state" data-mal-state aria-live="polite"></span>
+                <a class="mal-progress-link" href="https://myanimelist.net/anime/${malId}" target="_blank" rel="noopener">MyAnimeList ↗</a>
             </div>
-            <div class="mal-progress-bar" aria-hidden="true"><span style="width:${entry ? progressPercent({ ...entry, episodes: total }) : 0}%"></span></div>
-            <div class="mal-progress-foot">${entry ? `<button type="button" class="mal-link-btn" data-mal="remove">Remove from my list</button>` : '<span>Not on your MyAnimeList yet</span>'}<a href="https://myanimelist.net/anime/${malId}" target="_blank" rel="noopener">Open on MyAnimeList ↗</a></div>
-        </div>`;
+            <div class="mal-progress-controls">
+                <div class="mal-control mal-status-pick mal-status-${status || 'none'}" data-mal-focus="status">
+                    <select data-mal="status" aria-label="Status on my list">
+                        <option value="">Add to my list</option>
+                        ${STATUSES.map(([value, label]) => `<option value="${value}"${value === status ? ' selected' : ''}>${label}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="mal-stepper" role="group" aria-label="Episodes watched" data-mal-focus="episodes">
+                    <button type="button" data-mal="minus" aria-label="One episode fewer"${watched <= 0 ? ' disabled' : ''}>−</button>
+                    <label class="mal-stepper-value"><input data-mal="episodes" type="number" inputmode="numeric" min="0"${total ? ` max="${total}"` : ''} value="${watched}" aria-label="Episodes watched"><span>/ ${total || '?'} ep</span></label>
+                    <button type="button" data-mal="plus" aria-label="One more episode"${total && watched >= total ? ' disabled' : ''}>+</button>
+                </div>
+                <div class="mal-control mal-score-pick${score ? ' has-score' : ''}" data-mal-focus="score">
+                    <select data-mal="score" aria-label="My score">
+                        ${SCORE_LABELS.map((label, value) => `<option value="${value}"${value === score ? ' selected' : ''}>${value ? `${value} · ${label}` : 'No score'}</option>`).reverse().join('')}
+                    </select>
+                </div>
+                ${entry ? '<button type="button" class="mal-remove-btn" data-mal="remove" data-mal-focus="remove" title="Remove from my list" aria-label="Remove from my list">Remove</button>' : ''}
+            </div>
+            <div class="mal-progress-meter" aria-hidden="true"><span style="width:${entry ? progressPercent({ ...entry, episodes: total }) : 0}%"></span></div>
+        </section>`;
+        // The same rounded dropdowns as the rest of the site.
+        box.querySelectorAll('select').forEach(select => { if (typeof enhanceSelect === 'function') enhanceSelect(select); });
         const q = name => box.querySelector(`[data-mal="${name}"]`);
         q('status').addEventListener('change', async event => {
             const value = event.target.value;
             if (!value) {
-                if (await siteConfirm(`Remove “${displayTitleOf(entry || newEntry(info))}” from your MyAnimeList?`, { title: 'Remove from list', confirmText: 'Remove' })) removeFromList(malId);
+                if (entry && await siteConfirm(`Remove “${displayTitleOf(entry)}” from your MyAnimeList?`, { title: 'Remove from list', confirmText: 'Remove' })) removeFromList(malId);
                 else drawPanel();
                 return;
             }
@@ -508,7 +546,7 @@ const MalSync = (() => {
         q('remove')?.addEventListener('click', async () => {
             if (await siteConfirm(`Remove “${displayTitleOf(entry)}” from your MyAnimeList?`, { title: 'Remove from list', confirmText: 'Remove' })) removeFromList(malId);
         });
-        if (focused) q(focused)?.focus();
+        if (focused) box.querySelector(`[data-mal-focus="${focused}"]`)?.querySelector('button:not(:disabled), input')?.focus();
         paintSaveState(malId);
     }
 
@@ -526,37 +564,176 @@ const MalSync = (() => {
         host.className = `mal-save-state ${info?.state || ''}`;
         if (!info) { host.textContent = ''; return; }
         if (info.state === 'saving') host.textContent = 'Saving…';
-        else if (info.state === 'saved') host.textContent = '✓ Saved to MyAnimeList';
+        else if (info.state === 'saved') host.textContent = '✓ Saved';
         else if (info.state === 'removed') host.textContent = '✓ Removed from MyAnimeList';
         else if (info.state === 'error') {
-            host.innerHTML = '⚠ Not saved <button type="button" class="mal-link-btn">Retry</button>';
+            host.innerHTML = '⚠ Not saved · <button type="button" class="mal-link-btn">Retry</button>';
             host.querySelector('button').addEventListener('click', () => info.retry?.());
         }
     }
 
     /* ---------- My List page ---------- */
+    // Sort and filter state lives in the address (#/list?tab=...&sort=...&type=...),
+    // so refresh, Back and shared links keep it.
+    const SORTS = Object.freeze({
+        updated: { label: 'Last updated', order: 'desc' },
+        title: { label: 'Title', order: 'asc' },
+        score: { label: 'My score', order: 'desc' },
+        mean: { label: 'MAL score', order: 'desc' },
+        progress: { label: 'Progress', order: 'desc' },
+        aired: { label: 'Air date', order: 'desc' },
+        type: { label: 'Type', order: 'asc' },
+    });
+    const TYPES = Object.freeze({ tv: 'TV', movie: 'Movie', ova: 'OVA', ona: 'ONA', special: 'Special', music: 'Music' });
+    const AIRING = Object.freeze({ currently_airing: 'Airing', finished_airing: 'Finished', not_yet_aired: 'Not yet aired' });
+    const SEASONS = ['winter', 'spring', 'summer', 'fall'];
+    const SCORE_FILTERS = Object.freeze({ scored: 'Scored', unscored: 'Not scored', 9: '9 or higher', 8: '8 or higher', 7: '7 or higher', 5: '5 or higher', low: '4 or lower' });
+    const FILTER_KEYS = ['type', 'airing', 'year', 'season', 'genre', 'score'];
     let currentTab = '';
-    function renderMyList(tab = '') {
+    let listView = defaultListView();
+    let searchTimer = null;
+
+    function defaultListView() { return { q: '', sort: 'updated', order: '', type: '', airing: '', year: '', season: '', genre: '', score: '' }; }
+    function readListView(params = {}) {
+        const view = defaultListView();
+        view.q = String(params.q || '').slice(0, 80);
+        if (SORTS[params.sort]) view.sort = params.sort;
+        if (['asc', 'desc'].includes(params.order)) view.order = params.order;
+        if (TYPES[params.type]) view.type = params.type;
+        if (AIRING[params.airing]) view.airing = params.airing;
+        if (/^\d{4}$/.test(params.year || '')) view.year = params.year;
+        if (SEASONS.includes(params.season)) view.season = params.season;
+        if (params.genre) view.genre = String(params.genre).slice(0, 40);
+        if (SCORE_FILTERS[params.score]) view.score = params.score;
+        return view;
+    }
+    const sortOrder = () => listView.order || SORTS[listView.sort].order;
+    function listHash(tab = currentTab, view = listView) {
+        const params = { tab };
+        if (view.q) params.q = view.q;
+        if (view.sort !== 'updated') params.sort = view.sort;
+        if (view.order && view.order !== SORTS[view.sort].order) params.order = view.order;
+        FILTER_KEYS.forEach(key => { if (view[key]) params[key] = view[key]; });
+        return routeHash('/list', params);
+    }
+    function syncListUrl() {
+        const hash = listHash();
+        if (hash !== location.hash) history.replaceState(history.state, '', hash);
+    }
+    const activeFilterCount = () => FILTER_KEYS.filter(key => listView[key]).length;
+
+    function typeGroup(mediaType) { return mediaType === 'tv_special' ? 'special' : mediaType; }
+    function matchesView(entry) {
+        const v = listView;
+        if (v.q) {
+            const needle = v.q.toLowerCase();
+            if (!`${entry.title} ${entry.titleEn}`.toLowerCase().includes(needle)) return false;
+        }
+        if (v.type && typeGroup(entry.mediaType) !== v.type) return false;
+        if (v.airing && entry.airing !== v.airing) return false;
+        if (v.year && entry.season?.year !== Number(v.year)) return false;
+        if (v.season && entry.season?.season !== v.season) return false;
+        if (v.genre && !(entry.genres || []).includes(v.genre)) return false;
+        if (v.score) {
+            const s = entry.score || 0;
+            if (v.score === 'scored' && !s) return false;
+            if (v.score === 'unscored' && s) return false;
+            if (v.score === 'low' && !(s > 0 && s <= 4)) return false;
+            if (/^\d+$/.test(v.score) && s < Number(v.score)) return false;
+        }
+        return true;
+    }
+    function sortValue(entry) {
+        switch (listView.sort) {
+            case 'title': return displayTitleOf(entry).toLowerCase();
+            case 'score': return entry.score || null;          // unscored always last
+            case 'mean': return entry.mean || null;
+            case 'progress': return entry.status === 'completed' ? 1 : (entry.episodes ? entry.watched / entry.episodes : (entry.watched ? 0.01 : 0));
+            case 'aired': return entry.season?.year ? entry.season.year * 10 + SEASONS.indexOf(entry.season.season) : null;
+            case 'type': return Object.keys(TYPES).indexOf(typeGroup(entry.mediaType)) >= 0 ? Object.keys(TYPES).indexOf(typeGroup(entry.mediaType)) : 99;
+            default: return String(entry.updatedAt || '');
+        }
+    }
+    function sortEntries(items) {
+        const direction = sortOrder() === 'asc' ? 1 : -1;
+        return items.map(entry => ({ entry, value: sortValue(entry) })).sort((a, b) => {
+            if (a.value == null && b.value != null) return 1;
+            if (b.value == null && a.value != null) return -1;
+            if (a.value != null && b.value != null && a.value !== b.value) return (a.value < b.value ? -1 : 1) * direction;
+            return displayTitleOf(a.entry).localeCompare(displayTitleOf(b.entry));
+        }).map(item => item.entry);
+    }
+
+    function renderMyList(tab = '', params = {}) {
         const loggedIn = isConfigured() && isLoggedIn();
-        const validTabs = ['history', ...STATUSES.map(([value]) => value)];
+        const validTabs = ['all', 'history', ...STATUSES.map(([value]) => value)];
         currentTab = validTabs.includes(tab) ? tab : (loggedIn ? 'watching' : 'history');
+        listView = readListView(params);
         if (loggedIn) refreshList().catch(error => showNotice(error.message, 'error')); // starts first so the list shows a spinner, not "empty"
+        syncToolbar(true);
         drawMyList();
+    }
+
+    function optionsHtml(map, current, emptyLabel) {
+        return `<option value="">${emptyLabel}</option>` + Object.entries(map).map(([value, label]) => `<option value="${escapeHtml(value)}"${value === current ? ' selected' : ''}>${escapeHtml(label)}</option>`).join('');
+    }
+    // Puts the current sort/filter values into the toolbar. Year and genre choices
+    // come from what's actually on your list.
+    function syncToolbar(force = false) {
+        const entries = Object.values(loadList().entries).filter(entry => !hiddenAsAdult(entry));
+        const years = [...new Set(entries.map(entry => entry.season?.year).filter(Boolean))].sort((a, b) => b - a);
+        const genres = [...new Set(entries.flatMap(entry => entry.genres || []))].sort((a, b) => a.localeCompare(b));
+        if (listView.year && !years.includes(Number(listView.year))) years.unshift(Number(listView.year));
+        if (listView.genre && !genres.includes(listView.genre)) genres.unshift(listView.genre);
+        const set = (id, html, value) => {
+            const select = $(id);
+            if (!select) return;
+            if (html != null && select.dataset.options !== html) { select.innerHTML = html; select.dataset.options = html; }
+            select.value = value;
+            select._azRebuild?.();
+        };
+        set('mylist-sort', Object.entries(SORTS).map(([value, { label }]) => `<option value="${value}">${label}</option>`).join(''), listView.sort);
+        set('mylist-type', optionsHtml(TYPES, listView.type, 'All types'), listView.type);
+        set('mylist-airing', optionsHtml(AIRING, listView.airing, 'Any airing status'), listView.airing);
+        set('mylist-year', optionsHtml(Object.fromEntries(years.map(year => [String(year), String(year)])), listView.year, 'All years'), listView.year);
+        set('mylist-season', optionsHtml({ winter: 'Winter', spring: 'Spring', summer: 'Summer', fall: 'Fall' }, listView.season, 'All seasons'), listView.season);
+        set('mylist-genre', optionsHtml(Object.fromEntries(genres.map(genre => [genre, genre])), listView.genre, 'All genres'), listView.genre);
+        set('mylist-score', optionsHtml(SCORE_FILTERS, listView.score, 'Any score'), listView.score);
+        const search = $('mylist-search');
+        if (search && (force || document.activeElement !== search)) search.value = listView.q;
+        const order = $('mylist-order');
+        if (order) {
+            const asc = sortOrder() === 'asc';
+            order.textContent = asc ? '↑' : '↓';
+            order.setAttribute('aria-label', asc ? 'Ascending order. Switch to descending' : 'Descending order. Switch to ascending');
+            order.title = asc ? 'Ascending' : 'Descending';
+        }
+        const count = activeFilterCount();
+        const badge = document.querySelector('#mylist-filter-toggle .mylist-filter-count');
+        if (badge) badge.textContent = count ? String(count) : '';
+        $('mylist-filter-reset')?.classList.toggle('hidden', !count && !listView.q);
     }
 
     function drawMyList() {
         const tabs = $('mylist-tabs');
         const grid = $('mal-list-grid');
         const historyPanel = $('history-panel');
+        const toolbar = $('mylist-toolbar');
+        const filterPanel = $('mylist-filter-panel');
+        const countLine = $('mylist-count');
         if (!tabs || !grid || !historyPanel) return;
         const loggedIn = isConfigured() && isLoggedIn();
         const entries = Object.values(loadList().entries).filter(entry => !hiddenAsAdult(entry));
         const historyCount = (typeof clickHistory !== 'undefined' ? clickHistory : []).filter(item => adultContentEnabled || !item.isAdult).length;
-        const tabLink = (value, label, count) => `<a class="mylist-tab${currentTab === value ? ' active' : ''}" href="#/list?tab=${value}"${currentTab === value ? ' aria-current="page"' : ''}>${label}${count != null ? ` <span>${count}</span>` : ''}</a>`;
-        tabs.innerHTML = (loggedIn ? STATUSES.map(([value, label]) => tabLink(value, label, entries.filter(entry => entry.status === value).length)).join('') : '') + tabLink('history', 'History', historyCount);
+        const tabLink = (value, label, count) => `<a class="mylist-tab${currentTab === value ? ' active' : ''}" href="${value === 'history' ? '#/list?tab=history' : listHash(value)}"${currentTab === value ? ' aria-current="page"' : ''}>${label}${count != null ? ` <span>${count}</span>` : ''}</a>`;
+        tabs.innerHTML = (loggedIn ? tabLink('all', 'All', entries.length) + STATUSES.map(([value, label]) => tabLink(value, label, entries.filter(entry => entry.status === value).length)).join('') : '') + tabLink('history', 'History', historyCount);
         renderActions(loggedIn);
 
-        if (currentTab === 'history') {
+        const showList = loggedIn && currentTab !== 'history';
+        toolbar?.classList.toggle('hidden', !showList);
+        if (!showList) { filterPanel?.classList.add('hidden'); $('mylist-filter-toggle')?.setAttribute('aria-expanded', 'false'); }
+        countLine?.classList.toggle('hidden', !showList);
+        if (currentTab === 'history' || !loggedIn) {
             grid.classList.add('hidden');
             historyPanel.classList.remove('hidden');
             if (!loggedIn) showNotice(isConfigured() ? 'Log in with MyAnimeList to see and update your list here.' : 'Connect MyAnimeList (Profile Settings) to track your progress here.');
@@ -566,10 +743,19 @@ const MalSync = (() => {
         }
         historyPanel.classList.add('hidden');
         grid.classList.remove('hidden');
-        const items = entries.filter(entry => entry.status === currentTab).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-        if (!loadList().fetchedAt && listRequest) { grid.innerHTML = '<div class="spinner"></div>'; showNotice(''); return; }
+        syncToolbar();
+        if (!loadList().fetchedAt && listRequest) { grid.innerHTML = '<div class="spinner"></div>'; showNotice(''); if (countLine) countLine.textContent = ''; return; }
         showNotice('');
-        if (!items.length) { grid.innerHTML = `<div class="empty-state">Nothing in ${STATUS_LABEL[currentTab]} yet.</div>`; return; }
+        const inTab = currentTab === 'all' ? entries : entries.filter(entry => entry.status === currentTab);
+        const items = sortEntries(inTab.filter(matchesView));
+        const tabName = currentTab === 'all' ? 'your list' : STATUS_LABEL[currentTab];
+        if (countLine) countLine.textContent = inTab.length && items.length !== inTab.length ? `Showing ${items.length} of ${inTab.length}` : '';
+        if (!inTab.length) { grid.innerHTML = `<div class="empty-state">Nothing in ${escapeHtml(tabName)} yet.</div>`; return; }
+        if (!items.length) {
+            grid.innerHTML = `<div class="empty-state">Nothing in ${escapeHtml(tabName)} matches these filters.<button type="button" class="inline-retry-btn" data-mal-action="clear-filters">Clear filters</button></div>`;
+            grid.querySelector('[data-mal-action="clear-filters"]').addEventListener('click', clearListFilters);
+            return;
+        }
         grid.innerHTML = '';
         items.forEach(entry => grid.appendChild(listCard(entry)));
     }
@@ -578,8 +764,9 @@ const MalSync = (() => {
         const card = document.createElement('div');
         card.className = 'anime-card mal-card';
         const title = displayTitleOf(entry);
-        const meta = [entry.status === 'plan_to_watch' ? `${entry.episodes || '?'} episodes` : `Ep ${progressText(entry)}`, entry.score ? `★ ${entry.score}` : ''].filter(Boolean).join(' · ');
-        card.innerHTML = `<a class="anime-card-link" href="#/mal/${entry.id}" title="${escapeHtml(title)}"><img src="${escapeHtml(entry.picture)}" alt="" loading="lazy"><div class="anime-card-overlay"></div><div class="anime-card-title"><strong class="anime-card-name">${escapeHtml(title)}</strong><span>${escapeHtml(meta)}</span></div><div class="mal-card-progress" aria-hidden="true"><span style="width:${progressPercent(entry)}%"></span></div></a>`;
+        const statusLabel = currentTab === 'all' ? STATUS_LABEL[entry.status] : '';
+        const meta = [statusLabel, entry.status === 'plan_to_watch' ? `${entry.episodes || '?'} ep` : `Ep ${progressText(entry)}`, entry.score ? `★ ${entry.score}` : ''].filter(Boolean).join(' · ');
+        card.innerHTML = `<a class="anime-card-link" href="#/mal/${entry.id}" title="${escapeHtml(title)}"><img src="${escapeHtml(entry.picture)}" alt="" loading="lazy">${currentTab === 'all' ? `<span class="mal-card-status mal-status-${entry.status}" aria-hidden="true"></span>` : ''}<div class="anime-card-overlay"></div><div class="anime-card-title"><strong class="anime-card-name">${escapeHtml(title)}</strong><span>${escapeHtml(meta)}</span></div><div class="mal-card-progress" aria-hidden="true"><span style="width:${progressPercent(entry)}%"></span></div></a>`;
         if (entry.status === 'watching' && (!entry.episodes || entry.watched < entry.episodes)) {
             const plus = document.createElement('button');
             plus.type = 'button';
@@ -591,6 +778,37 @@ const MalSync = (() => {
             card.appendChild(plus);
         }
         return card;
+    }
+
+    function setListView(changes) {
+        listView = { ...listView, ...changes };
+        syncListUrl();
+        syncToolbar();
+        drawMyList();
+    }
+    function clearListFilters() {
+        setListView({ q: '', type: '', airing: '', year: '', season: '', genre: '', score: '' });
+        const search = $('mylist-search');
+        if (search) search.value = '';
+    }
+    function initListToolbar() {
+        const search = $('mylist-search');
+        search?.addEventListener('input', () => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => setListView({ q: search.value.trim() }), 200);
+        });
+        search?.addEventListener('keydown', event => { if (event.key === 'Escape' && search.value) { event.stopPropagation(); search.value = ''; setListView({ q: '' }); } });
+        $('mylist-sort')?.addEventListener('change', event => setListView({ sort: event.target.value, order: '' }));
+        $('mylist-order')?.addEventListener('click', () => setListView({ order: sortOrder() === 'asc' ? 'desc' : 'asc' }));
+        [['mylist-type', 'type'], ['mylist-airing', 'airing'], ['mylist-year', 'year'], ['mylist-season', 'season'], ['mylist-genre', 'genre'], ['mylist-score', 'score']]
+            .forEach(([id, key]) => $(id)?.addEventListener('change', event => setListView({ [key]: event.target.value })));
+        $('mylist-filter-reset')?.addEventListener('click', clearListFilters);
+        const toggle = $('mylist-filter-toggle');
+        toggle?.addEventListener('click', () => {
+            const open = toggle.getAttribute('aria-expanded') !== 'true';
+            toggle.setAttribute('aria-expanded', String(open));
+            $('mylist-filter-panel')?.classList.toggle('hidden', !open);
+        });
     }
 
     function renderActions(loggedIn) {
@@ -680,6 +898,7 @@ const MalSync = (() => {
     window.addEventListener('pagehide', () => flushAll({ keepalive: true }));
     window.addEventListener('storage', event => { if ([AUTH_KEY, LIST_KEY, RELAY_KEY].includes(event.key)) { listCache = null; renderSettings(); refreshViews(); } });
     document.addEventListener('DOMContentLoaded', renderSettings);
+    document.addEventListener('DOMContentLoaded', initListToolbar);
 
     return { renderMyList, renderProgressPanel, handleCallback, openByMalId, refreshViews, startLogin, logout, refreshList, isLoggedIn, isConfigured };
 })();

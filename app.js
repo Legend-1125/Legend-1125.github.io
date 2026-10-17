@@ -843,7 +843,7 @@ function parseRoute(hash = location.hash) {
     }
     if (section === 'browse' && BROWSE_TARGETS.has(id)) return { name: 'browse', target: id, page };
     if (section === 'studio' && numericId) return { name: 'studio', id: numericId, studioName: params.get('name') || '', page };
-    if (section === 'list' && segments.length === 1) return { name: 'list', tab: params.get('tab') || '' };
+    if (section === 'list' && segments.length === 1) return { name: 'list', tab: params.get('tab') || '', params: Object.fromEntries(params) };
     if (['schedule', 'news'].includes(section) && segments.length === 1) return { name: section };
     // MyAnimeList sync (mal.js): login return and "open this MAL entry in AniZone".
     if (section === 'mal-callback') return { name: 'mal-callback', code: params.get('code') || '', state: params.get('state') || '', error: params.get('error') || '' };
@@ -951,7 +951,7 @@ function renderRoute({ fresh = false } = {}) {
         case 'list':
             setPageTitle('My List');
             showView('view-history');
-            if (window.MalSync) MalSync.renderMyList(route.tab);
+            if (window.MalSync) MalSync.renderMyList(route.tab, route.params);
             else renderHistoryLogGrid();
             restorePendingScroll();
             break;
@@ -2959,6 +2959,7 @@ function initDetailPreferences(){
     button.onclick=()=>{sync();panel.classList.toggle('hidden');};
     panel.addEventListener('change',event=>{const input=event.target.closest('[data-detail-pref]');if(!input)return;const name=input.dataset.detailPref;const prefs=getDetailPrefs();prefs[name]=input.checked;saveJson(DETAIL_PREFS_KEY,prefs);applyDetailPreferences();if(currentDetailAnime&&input.checked)renderDetailSection(name,currentDetailAnime);if(name==='countdown'&&!input.checked)clearInterval(countdownTimer);});
     document.addEventListener('click',event=>{if(!panel.contains(event.target)&&event.target!==button)panel.classList.add('hidden');});
+    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!panel.classList.contains('hidden')){panel.classList.add('hidden');button.focus();}});
 }
 function initConnectedExperience(){
     initThemes();

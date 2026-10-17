@@ -382,6 +382,21 @@
 <div class="mylist-actions" id="mylist-actions"></div>
 </div>
 <nav class="mylist-tabs" id="mylist-tabs" aria-label="My List sections"></nav>
+<div class="mylist-toolbar hidden" id="mylist-toolbar">
+<label class="mylist-search"><svg aria-hidden="true" fill="none" height="15" stroke="currentColor" stroke-linecap="round" stroke-width="2.2" viewBox="0 0 24 24" width="15"><circle cx="11" cy="11" r="8"></circle><line x1="21" x2="16.65" y1="21" y2="16.65"></line></svg><input id="mylist-search" type="search" placeholder="Search your list" aria-label="Search your list" autocomplete="off"></label>
+<div class="mylist-sort-group"><select class="filter-pill" id="mylist-sort" aria-label="Sort by"></select><button type="button" class="mylist-order" id="mylist-order" aria-label="Descending order. Switch to ascending">↓</button></div>
+<button type="button" class="discover-filter-toggle mylist-filter-toggle" id="mylist-filter-toggle" aria-expanded="false" aria-controls="mylist-filter-panel"><span>Filters</span><span class="mylist-filter-count"></span><span class="discover-filter-chevron"></span></button>
+</div>
+<div class="mylist-filter-panel hidden" id="mylist-filter-panel">
+<select class="filter-pill" id="mylist-type" aria-label="Type"></select>
+<select class="filter-pill" id="mylist-airing" aria-label="Airing status"></select>
+<select class="filter-pill" id="mylist-year" aria-label="Year"></select>
+<select class="filter-pill" id="mylist-season" aria-label="Season"></select>
+<select class="filter-pill" id="mylist-genre" aria-label="Genre"></select>
+<select class="filter-pill" id="mylist-score" aria-label="My score"></select>
+<button class="filter-reset-btn hidden" id="mylist-filter-reset" type="button">Reset</button>
+</div>
+<p class="mylist-count hidden" id="mylist-count" aria-live="polite"></p>
 <div class="mylist-notice hidden" id="mylist-notice" role="status"></div>
 <div class="card-grid" id="mal-list-grid"></div>
 <div class="history-panel" id="history-panel">
