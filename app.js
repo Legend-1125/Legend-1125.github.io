@@ -1370,22 +1370,98 @@ function renderHeroIndicators() {
         container.appendChild(dot);
     });
 }
-function renderHeroSlide(index) {
-    const anime = heroSlides[index];
-    if (!anime) return;
-    const background = anime.bannerImage || imageUrl(anime);
+/* Home banner images in HD.
+   AniList's banners are about 1900×400, and the banner is most of the screen tall,
+   so they get stretched 2–3× and look soft. Kitsu keeps the same artwork at 3360×800,
+   so that's used when it has one; AniList's banner is shown first (it's already
+   known) and swapped for the sharp one as soon as it has loaded. Lookups are kept
+   for two weeks, so after the first visit the HD image appears straight away. */
+const KITSU_API = 'https://kitsu.io/api/edge';
+const HERO_HD_KEY = 'anizone:hero-hd:v1';
+const HERO_HD_TTL = 14 * 24 * 60 * 60 * 1000;
+const HERO_HD_MISS_TTL = 3 * 24 * 60 * 60 * 1000;
+const HERO_HD_TIMEOUT_MS = 5000;
+const heroHdInflight = new Map();
+let heroRenderToken = 0;
+function heroHdCache() {
+    try { return JSON.parse(localStorage.getItem(HERO_HD_KEY) || '{}') || {}; } catch { return {}; }
+}
+// The HD image remembered for this MAL id: a URL, '' when Kitsu has none, or undefined when unknown.
+function cachedHeroHd(malId) {
+    const record = malId ? heroHdCache()[malId] : null;
+    if (!record || Date.now() > record.expiresAt) return undefined;
+    return record.url;
+}
+function rememberHeroHd(malId, url) {
+    const cache = heroHdCache();
+    const now = Date.now();
+    for (const [id, record] of Object.entries(cache)) if (!record || now > record.expiresAt) delete cache[id];
+    cache[malId] = { url, expiresAt: now + (url ? HERO_HD_TTL : HERO_HD_MISS_TTL) };
+    const ids = Object.keys(cache);
+    if (ids.length > 150) ids.sort((a, b) => cache[a].expiresAt - cache[b].expiresAt).slice(0, ids.length - 150).forEach(id => delete cache[id]);
+    try { localStorage.setItem(HERO_HD_KEY, JSON.stringify(cache)); } catch {}
+}
+// Resolves to the HD banner URL, or '' when there isn't one (or Kitsu can't be reached).
+function findHeroHd(anime) {
+    const malId = Number(anime?.idMal) || 0;
+    if (!malId) return Promise.resolve('');
+    const known = cachedHeroHd(malId);
+    if (known !== undefined) return Promise.resolve(known);
+    if (heroHdInflight.has(malId)) return heroHdInflight.get(malId);
+    const params = new URLSearchParams({ 'filter[externalSite]': 'myanimelist/anime', 'filter[externalId]': String(malId), include: 'item', 'fields[anime]': 'coverImage' });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HERO_HD_TIMEOUT_MS);
+    const task = fetch(`${KITSU_API}/mappings?${params}`, { headers: { Accept: 'application/vnd.api+json' }, signal: controller.signal })
+        .then(async response => {
+            if (!response.ok) throw new Error(`Kitsu answered ${response.status}`);
+            const payload = await response.json();
+            const item = (payload?.included || []).find(entry => entry?.type === 'anime');
+            const cover = item?.attributes?.coverImage;
+            const url = cover?.large || cover?.original || '';
+            rememberHeroHd(malId, /^https:\/\//.test(url) ? url : '');
+            return /^https:\/\//.test(url) ? url : '';
+        })
+        .catch(error => { console.warn('HD banner unavailable:', error.message); return ''; })
+        .finally(() => { clearTimeout(timer); heroHdInflight.delete(malId); });
+    heroHdInflight.set(malId, task);
+    return task;
+}
+function preloadImage(url) {
+    return new Promise(resolve => {
+        if (!url) return resolve(false);
+        const image = new Image();
+        image.decoding = 'async';
+        image.onload = () => resolve(true);
+        image.onerror = () => resolve(false);
+        image.src = url;
+    });
+}
+// Cross-fades the banner to a new image. A poster (no banner anywhere) is shown blurred,
+// because a portrait poster stretched across the screen looks broken.
+function showHeroBackground(url, { poster = false } = {}) {
     const layers = [document.getElementById('hero-bg-a'), document.getElementById('hero-bg-b')];
     const nextLayerIndex = heroBackgroundLayer === 0 ? 1 : 0;
     const currentLayer = layers[heroBackgroundLayer];
     const nextLayer = layers[nextLayerIndex];
+    if (!nextLayer) return;
+    nextLayer.style.backgroundImage = url ? `url('${url.replace(/'/g, '%27')}')` : 'none';
+    nextLayer.classList.toggle('poster-fill', poster);
+    nextLayer.dataset.src = url || '';
+    nextLayer.classList.add('active');
+    currentLayer?.classList.remove('active');
+    heroBackgroundLayer = nextLayerIndex;
+}
+function renderHeroSlide(index) {
+    const anime = heroSlides[index];
+    if (!anime) return;
+    const token = ++heroRenderToken;
+    const knownHd = cachedHeroHd(Number(anime.idMal) || 0);
+    const quick = knownHd || anime.bannerImage || imageUrl(anime);
+    const quickIsPoster = !knownHd && !anime.bannerImage;
 
     const applySlide = () => {
-        if (nextLayer) {
-            nextLayer.style.backgroundImage = `url('${background}')`;
-            nextLayer.classList.add('active');
-            currentLayer?.classList.remove('active');
-            heroBackgroundLayer = nextLayerIndex;
-        }
+        if (token !== heroRenderToken) return;
+        showHeroBackground(quick, { poster: quickIsPoster && Boolean(quick) });
         document.getElementById('hero-title').textContent = displayTitle(anime);
         document.getElementById('hero-synopsis').textContent = stripHtml(anime.description) || 'No synopsis available.';
         document.querySelector('.hero-badge.top-10').textContent = `#${index + 1} Trending`;
@@ -1397,13 +1473,18 @@ function renderHeroSlide(index) {
         heroWatchButton.onclick = () => window.open(buildWatchUrl(selectedWatchSite.url, watchTitle), '_blank', 'noopener,noreferrer');
         document.getElementById('hero-info-btn').onclick = () => viewSingleAnime(anime.id);
         document.querySelectorAll('#hero-indicators .hero-dot').forEach((dot, i) => dot.classList.toggle('active', i === index));
+        upgradeHeroSlide(anime, token, quick);
+        // Get the next banner ready so the next slide is sharp from the start.
+        const next = heroSlides[(index + 1) % heroSlides.length];
+        if (next && next !== anime) findHeroHd(next).then(url => preloadImage(url || next.bannerImage));
     };
-
-    if (!background) { applySlide(); return; }
-    const preload = new Image();
-    preload.onload = applySlide;
-    preload.onerror = applySlide;
-    preload.src = background;
+    preloadImage(quick).then(applySlide);
+}
+async function upgradeHeroSlide(anime, token, shown) {
+    const hd = await findHeroHd(anime);
+    if (!hd || hd === shown || token !== heroRenderToken) return;
+    if (!(await preloadImage(hd)) || token !== heroRenderToken) return;
+    showHeroBackground(hd);
 }
 
 function initDiscoverFilters() {

@@ -1697,6 +1697,9 @@ body {
     will-change:opacity, transform;
 }
 .hero-bg-layer.active { opacity:1; transform:scale(1); }
+/* Only a poster to show: blur it into a backdrop instead of stretching it. */
+.hero-bg-layer.poster-fill { filter:blur(22px) brightness(.6) saturate(1.15); transform:scale(1.12); }
+.hero-bg-layer.poster-fill.active { transform:scale(1.1); }
 .hero-vignette { z-index:1; }
 .hero-content, .hero-nav-arrow { z-index:3; }
 .cast-language-toggle button { transition:background-color .22s ease, color .22s ease, box-shadow .22s ease, transform .22s ease; }
