@@ -12,7 +12,7 @@
 const MalSync = (() => {
     // Your relay's address, e.g. 'https://anizone-mal.<your-name>.workers.dev'.
     // Can also be set per browser in Profile Settings -> MyAnimeList.
-    const RELAY_DEFAULT = '';
+    const RELAY_DEFAULT = 'https://anizone-mal.vavoruganti.workers.dev';
     const SETUP_GUIDE_URL = 'https://github.com/Legend-1125/Legend-1125.github.io/blob/main/worker/README.md';
 
     const RELAY_KEY = 'anizone:mal:relay:v1';
@@ -46,8 +46,10 @@ const MalSync = (() => {
     const remove = (key, store = localStorage) => { try { store.removeItem(key); } catch {} };
     const $ = id => document.getElementById(id);
 
+    // Letters and digits only: the PKCE standard also allows "-._~", but those
+    // characters aren't needed and some sign-in servers are stricter than the standard.
     function randomString(length) {
-        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
         const bytes = crypto.getRandomValues(new Uint8Array(length));
         return Array.from(bytes, byte => alphabet[byte % alphabet.length]).join('');
     }
@@ -116,7 +118,7 @@ const MalSync = (() => {
             const response = await relayFetch('/config');
             if (!response.ok) throw new Error(await readError(response, 'The relay is not set up correctly.'));
             const config = await response.json();
-            const verifier = randomString(96);   // PKCE: MAL only supports the "plain" method
+            const verifier = randomString(64);   // PKCE: MAL only supports the "plain" method (43-128 characters)
             const nonce = randomString(24);
             const back = location.hash && !location.hash.startsWith('#/mal-callback') ? location.hash : '#/';
             write(LOGIN_KEY, { verifier, nonce, back, relay: relayUrl(), startedAt: Date.now() }, sessionStorage);
