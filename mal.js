@@ -900,6 +900,9 @@ const MalSync = (() => {
     document.addEventListener('DOMContentLoaded', renderSettings);
     document.addEventListener('DOMContentLoaded', initListToolbar);
 
-    return { renderMyList, renderProgressPanel, handleCallback, openByMalId, refreshViews, startLogin, logout, refreshList, isLoggedIn, isConfigured };
+    // MAL ids on your list (any status), so Surprise Me can suggest something new.
+    const listedMalIds = () => new Set(isLoggedIn() ? Object.keys(loadList().entries).map(Number) : []);
+
+    return { renderMyList, renderProgressPanel, handleCallback, openByMalId, refreshViews, startLogin, logout, refreshList, isLoggedIn, isConfigured, listedMalIds };
 })();
 window.MalSync = MalSync;

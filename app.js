@@ -2047,35 +2047,59 @@ async function openVoiceActorPortfolioPanel(personId, personName) {
     }
 }
 
+/* Surprise Me
+   AniList only lets a request reach the first 5,000 results of any list, so a
+   random position is chosen within that limit (the old code picked from 12,000
+   and failed whenever it landed past 5,000). Picks come from released TV, movies,
+   OVAs and ONAs that enough people have watched and rated reasonably, and skip
+   titles already on your list, ones you've opened, and recent surprises. */
+const SURPRISE_PAGE_SIZE = 50;
+const SURPRISE_REACHABLE = 5000;
+const SURPRISE_FILTERS = Object.freeze({ popularity: 8000, score: 55, formats: ['TV', 'TV_SHORT', 'MOVIE', 'OVA', 'ONA'] });
+const SURPRISE_RECENT_KEY = 'anizone:surprise:recent:v1';
+const SURPRISE_TTL = 24 * 60 * 60 * 1000;
+
+function surprisePage(page) {
+    const query = `query ($page: Int!, $perPage: Int!, $popularity: Int, $score: Int, $formats: [MediaFormat], $isAdult: Boolean) {
+        Page(page: $page, perPage: $perPage) {
+            pageInfo { total lastPage }
+            media(type: ANIME, sort: POPULARITY_DESC, status_not: NOT_YET_RELEASED, popularity_greater: $popularity, averageScore_greater: $score, format_in: $formats, isAdult: $isAdult) { id idMal isAdult title { romaji english native } }
+        }
+    }`;
+    return aniRequest(query, {
+        page,
+        perPage: SURPRISE_PAGE_SIZE,
+        popularity: SURPRISE_FILTERS.popularity,
+        score: SURPRISE_FILTERS.score,
+        formats: SURPRISE_FILTERS.formats,
+        isAdult: adultContentEnabled ? null : false,
+    }, { cacheKey: `surprise:v2:${adultContentEnabled}:${page}`, ttl: SURPRISE_TTL, priority: 'interactive' });
+}
+
 async function triggerRandomShuffle() {
     showLoading(true);
     try {
-        // Use AniList for every surprise instead of choosing from the dashboard,
-        // which is intentionally biased toward recent/trending titles. A single
-        // request returns full detail data, avoiding a second slow API round trip.
-        const randomPage = Math.floor(Math.random() * 12000) + 1;
-        const query = `query ($page: Int!, $isAdult: Boolean) {
-            Page(page: $page, perPage: 1) {
-                media(type: ANIME, sort: ID_DESC, isAdult: $isAdult) { ${MEDIA_DETAIL_FIELDS} }
-            }
-        }`;
-        const data = await aniRequest(query, {
-            page: randomPage,
-            isAdult: adultContentEnabled ? null : false,
-        }, {
-            cacheKey: `surprise-random:${adultContentEnabled}:${randomPage}`,
-            ttl: CACHE_TTL.discover,
-            priority: 'interactive',
-        });
-        const anime = data.Page?.media?.[0];
-        if (!anime) throw new Error('No random title found. Please try again.');
+        // Page 1 also tells us how many pages there are (and is kept for a day).
+        const first = await surprisePage(1);
+        const lastPage = Math.max(1, Number(first?.Page?.pageInfo?.lastPage) || 1);
+        const reachablePages = Math.min(lastPage, Math.floor(SURPRISE_REACHABLE / SURPRISE_PAGE_SIZE));
+        const page = 1 + Math.floor(Math.random() * reachablePages);
+        const data = page === 1 ? first : await surprisePage(page);
+        const candidates = (data?.Page?.media || []).filter(anime => adultContentEnabled || !anime.isAdult);
+        if (!candidates.length) throw new Error('No surprise found right now. Please try again.');
 
-        // The pick already has every detail field. Store it where the anime page
-        // looks, so opening its address needs no second request.
-        cacheSet(`detail:${anime.id}`, { Media: anime }, CACHE_TTL.details);
-        viewSingleAnime(anime.id);
+        let recent = [];
+        try { recent = JSON.parse(sessionStorage.getItem(SURPRISE_RECENT_KEY) || '[]'); } catch {}
+        const seen = new Set([...recent, ...clickHistory.map(item => item.id)]);
+        const listed = window.MalSync?.listedMalIds?.() || new Set();
+        const fresh = candidates.filter(anime => !seen.has(anime.id) && !listed.has(anime.idMal));
+        const pool = fresh.length ? fresh : candidates;
+        const pick = pool[Math.floor(Math.random() * pool.length)];
+
+        try { sessionStorage.setItem(SURPRISE_RECENT_KEY, JSON.stringify([pick.id, ...recent].slice(0, 50))); } catch {}
+        viewSingleAnime(pick.id);
     } catch (error) {
-        siteAlert(error.message || 'Unable to choose a surprise anime right now.');
+        siteAlert(error.message || 'Unable to choose a surprise anime right now.', { title: 'Surprise Me' });
     } finally { showLoading(false); }
 }
 
