@@ -387,12 +387,33 @@ class AniListError extends Error {
 }
 
 const ANILIST_CACHE_STALE_TTL = 7 * 24 * 60 * 60 * 1000;
-const aniInflight = new Map();
-let aniQueue = Promise.resolve();
+
+/* ==========================================
+   ANILIST REQUEST SCHEDULER
+   AniList allows 30 requests per minute (its temporarily reduced limit) and
+   accepts short bursts. Instead of spacing every request ~2s apart, requests go
+   out immediately while a per-minute budget lasts, a few at a time, and the
+   queue is ordered by priority:
+     interactive  what the visitor just clicked (anime page, search, grid pages)
+     normal       supporting data for the current page (franchise timeline)
+     background   prefetching (Home rows while another page is open)
+   ========================================== */
+const ANI_WINDOW_MS = 60_000;
+const ANI_WINDOW_BUDGET = 24;      // stay well under AniList's 30/min
+const ANI_MAX_IN_FLIGHT = 3;
+const ANI_MIN_GAP_MS = 120;        // spread a burst slightly
+const ANI_LOW_REMAINING = 3;       // server says we're nearly out: pause
+const ANI_LOW_REMAINING_PAUSE_MS = 15_000;
+const ANI_PRIORITY_RANK = Object.freeze({ interactive: 0, normal: 1, background: 2 });
+
+const aniJobs = new Map();         // request key -> job, shared by callers asking for the same data
+const aniPending = [];
+const aniSentAt = [];              // send times within the last minute
+let aniInFlightCount = 0;
+let aniPumpTimer = null;
+let aniJobSeq = 0;
 let aniLastRequestAt = 0;
 let aniCooldownUntil = 0;
-let aniRemaining = 30;
-let aniResetAt = 0;
 
 function cacheGetStale(key) {
     try {
@@ -404,47 +425,91 @@ function cacheGetStale(key) {
 }
 
 function updateAniRateState(response) {
+    const now = Date.now();
     const remaining = Number(response.headers.get('X-RateLimit-Remaining'));
     const reset = Number(response.headers.get('X-RateLimit-Reset'));
-    if (Number.isFinite(remaining)) aniRemaining = remaining;
-    if (Number.isFinite(reset) && reset > 0) aniResetAt = reset > 10_000_000_000 ? reset : reset * 1000;
+    const resetAt = Number.isFinite(reset) && reset > 0 ? (reset > 10_000_000_000 ? reset : reset * 1000) : 0;
     const retryAfter = Number(response.headers.get('Retry-After'));
     if (response.status === 429) {
-        const fallback = aniResetAt > Date.now() ? aniResetAt - Date.now() : 65_000;
-        aniCooldownUntil = Date.now() + (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : fallback);
+        const fallback = resetAt > now ? resetAt - now : 65_000;
+        aniCooldownUntil = Math.max(aniCooldownUntil, now + (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : fallback));
+    } else if (Number.isFinite(remaining) && response.headers.has('X-RateLimit-Remaining') && remaining <= ANI_LOW_REMAINING) {
+        // Another tab (or an earlier visit) used most of this minute's allowance.
+        aniCooldownUntil = Math.max(aniCooldownUntil, resetAt > now ? resetAt + 500 : now + ANI_LOW_REMAINING_PAUSE_MS);
     }
 }
 
-async function aniRequest(query, variables = {}, options = {}) {
+function aniDelayUntilNextSlot() {
+    const now = Date.now();
+    while (aniSentAt.length && now - aniSentAt[0] >= ANI_WINDOW_MS) aniSentAt.shift();
+    let wait = Math.max(0, aniCooldownUntil - now, ANI_MIN_GAP_MS - (now - aniLastRequestAt));
+    if (aniSentAt.length >= ANI_WINDOW_BUDGET) wait = Math.max(wait, aniSentAt[0] + ANI_WINDOW_MS - now);
+    return wait;
+}
+
+function pumpAniQueue() {
+    clearTimeout(aniPumpTimer);
+    aniPumpTimer = null;
+    for (let i = aniPending.length - 1; i >= 0; i--) {
+        if (aniPending[i].controller.signal.aborted) aniPending.splice(i, 1)[0].reject(abortError());
+    }
+    if (!aniPending.length || aniInFlightCount >= ANI_MAX_IN_FLIGHT) return;
+    const wait = aniDelayUntilNextSlot();
+    if (wait > 0) { aniPumpTimer = setTimeout(pumpAniQueue, wait); return; }
+    aniPending.sort((x, y) => x.rank - y.rank || x.seq - y.seq);
+    const job = aniPending.shift();
+    aniInFlightCount++;
+    aniLastRequestAt = Date.now();
+    aniSentAt.push(aniLastRequestAt);
+    job.run(job.controller.signal).then(job.resolve, job.reject).finally(() => {
+        aniInFlightCount--;
+        pumpAniQueue();
+    });
+    pumpAniQueue();
+}
+
+// Several parts of the page can ask for the same data. The shared request is only
+// cancelled when every caller that asked for it has gone (e.g. left the page).
+function joinAniJob(job, signal, priority) {
+    job.rank = Math.min(job.rank, ANI_PRIORITY_RANK[priority] ?? ANI_PRIORITY_RANK.normal);
+    if (!signal) { job.pinned = true; }
+    else if (!signal.aborted) {
+        job.liveSignals++;
+        signal.addEventListener('abort', () => {
+            job.liveSignals--;
+            if (!job.pinned && job.liveSignals === 0) {
+                job.controller.abort();
+                if (aniJobs.get(job.key) === job) aniJobs.delete(job.key);
+                pumpAniQueue();
+            }
+        }, { once: true });
+    }
+    if (job.queued && job.rank === 0) pumpAniQueue();
+    return job.promise;
+}
+
+function aniRequest(query, variables = {}, options = {}) {
     const { cacheKey = '', ttl = 0, signal, priority = 'normal' } = options;
-    const inflightKey = cacheKey || `${query}:${JSON.stringify(variables)}`;
+    if (signal?.aborted) return Promise.reject(abortError());
+    const key = cacheKey || `${query}:${JSON.stringify(variables)}`;
     if (cacheKey) {
         const cached = cacheGet(cacheKey);
-        if (cached) return cached;
+        if (cached) return Promise.resolve(cached);
     }
-    if (aniInflight.has(inflightKey)) return aniInflight.get(inflightKey);
+    const existing = aniJobs.get(key);
+    if (existing) return joinAniJob(existing, signal, priority);
 
-    const task = aniQueue = aniQueue.catch(() => {}).then(async () => {
-        // A cancelled request gives up its place in the queue immediately.
-        if (signal?.aborted) throw abortError();
+    const job = { key, rank: ANI_PRIORITY_RANK.normal, seq: ++aniJobSeq, controller: new AbortController(), liveSignals: 0, pinned: false, queued: true };
+    job.run = async jobSignal => {
+        job.queued = false;
         const stale = cacheKey ? cacheGetStale(cacheKey) : null;
-        // AniList documents a temporary degraded limit of 30 requests/minute.
-        // Keep the client below that ceiling and stop retry storms when the API says 429.
-        const baseSpacing = priority === 'interactive' ? 2050 : 2200;
-        const waitForSpacing = baseSpacing - (Date.now() - aniLastRequestAt);
-        const waitForReset = aniRemaining <= 1 && aniResetAt > Date.now() ? aniResetAt - Date.now() + 500 : 0;
-        const wait = Math.max(0, aniCooldownUntil - Date.now(), waitForSpacing, waitForReset);
-        if (wait) await delay(wait, signal);
-        if (signal?.aborted) throw abortError();
-
         let response;
         try {
-            aniLastRequestAt = Date.now();
             response = await fetch(ANILIST_API, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
                 body: JSON.stringify({ query, variables }),
-                signal,
+                signal: jobSignal,
             });
             updateAniRateState(response);
         } catch (error) {
@@ -466,14 +531,14 @@ async function aniRequest(query, variables = {}, options = {}) {
         }
         if (cacheKey && ttl) cacheSet(cacheKey, payload.data, ttl);
         return payload.data;
-    }).finally(() => { if (aniInflight.get(inflightKey) === task) aniInflight.delete(inflightKey); });
-
-    aniInflight.set(inflightKey, task);
-    // Never hand a cancelled request to a later caller asking for the same data.
-    signal?.addEventListener('abort', () => {
-        if (aniInflight.get(inflightKey) === task) aniInflight.delete(inflightKey);
-    }, { once: true });
-    return task;
+    };
+    job.promise = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject; })
+        .finally(() => { if (aniJobs.get(key) === job) aniJobs.delete(key); });
+    aniJobs.set(key, job);
+    aniPending.push(job);
+    const result = joinAniJob(job, signal, priority);
+    pumpAniQueue();
+    return result;
 }
 
 const MEDIA_CARD_FIELDS = `
@@ -544,13 +609,13 @@ function statusVariable(value) {
 }
 function minimumScore(value) { return value ? Number(value) : null; }
 
-async function getTrending(page = 1, perPage = PAGE_SIZE) {
+async function getTrending(page = 1, perPage = PAGE_SIZE, { signal, priority = 'interactive' } = {}) {
     const query = mediaPageQuery('', `, sort: TRENDING_DESC${adultArgument()}`);
-    return aniRequest(query, { page, perPage }, { cacheKey: `trending:${adultContentEnabled}:${page}:${perPage}`, ttl: CACHE_TTL.trending });
+    return aniRequest(query, { page, perPage }, { cacheKey: `trending:${adultContentEnabled}:${page}:${perPage}`, ttl: CACHE_TTL.trending, signal, priority });
 }
-async function getTopRated(page = 1, perPage = PAGE_SIZE) {
+async function getTopRated(page = 1, perPage = PAGE_SIZE, { signal, priority = 'interactive' } = {}) {
     const query = mediaPageQuery('', `, sort: SCORE_DESC${adultArgument()}`);
-    return aniRequest(query, { page, perPage }, { cacheKey: `top:${adultContentEnabled}:${page}:${perPage}`, ttl: CACHE_TTL.top });
+    return aniRequest(query, { page, perPage }, { cacheKey: `top:${adultContentEnabled}:${page}:${perPage}`, ttl: CACHE_TTL.top, signal, priority });
 }
 function buildMediaPageRequest({ page = 1, perPage = PAGE_SIZE, filters = {}, sort = null, cachePrefix = 'media', ttl = CACHE_TTL.search, signal, priority = 'normal' } = {}) {
     const variableDefs = ['$page: Int!', '$perPage: Int!'];
@@ -599,7 +664,7 @@ function buildMediaPageRequest({ page = 1, perPage = PAGE_SIZE, filters = {}, so
     return aniRequest(query, variables, { cacheKey, ttl, signal, priority });
 }
 
-async function getDiscover(page = 1, perPage = PAGE_SIZE) {
+async function getDiscover(page = 1, perPage = PAGE_SIZE, { signal, priority = 'interactive' } = {}) {
     return buildMediaPageRequest({
         page,
         perPage,
@@ -615,6 +680,8 @@ async function getDiscover(page = 1, perPage = PAGE_SIZE) {
         sort: 'POPULARITY_DESC',
         cachePrefix: 'discover',
         ttl: CACHE_TTL.discover,
+        signal,
+        priority,
     });
 }
 
@@ -644,7 +711,7 @@ async function searchAnime(queryText, page = 1, perPage = PAGE_SIZE, filters = {
     });
 }
 
-async function getStudioAnime(studioId, page = 1, perPage = PAGE_SIZE, filters = {}) {
+async function getStudioAnime(studioId, page = 1, perPage = PAGE_SIZE, filters = {}, { signal, priority = 'interactive' } = {}) {
     const sort = ({ popularity: 'POPULARITY_DESC', score: 'SCORE_DESC', start_date: 'START_DATE_DESC' })[filters.order] || 'POPULARITY_DESC';
     const query = `query ($id: Int!, $page: Int!, $perPage: Int!, $sort: [MediaSort]) {
         Studio(id: $id) {
@@ -660,6 +727,8 @@ async function getStudioAnime(studioId, page = 1, perPage = PAGE_SIZE, filters =
     }, {
         cacheKey: `studio:${adultContentEnabled}:${studioId}:${page}:${perPage}:${sort}`,
         ttl: CACHE_TTL.studio,
+        signal,
+        priority,
     });
 
     let items = data.Studio?.media?.nodes || [];
@@ -691,9 +760,9 @@ async function findStudios(search, perPage = 5, signal) {
     return aniRequest(query, { search, perPage }, { signal });
 }
 
-async function getAnimeDetails(id) {
+async function getAnimeDetails(id, { signal, priority = 'interactive' } = {}) {
     const query = `query ($id: Int!) { Media(id: $id, type: ANIME) { ${MEDIA_DETAIL_FIELDS} } }`;
-    return aniRequest(query, { id: Number(id) }, { cacheKey: `detail:${id}`, ttl: CACHE_TTL.details });
+    return aniRequest(query, { id: Number(id) }, { cacheKey: `detail:${id}`, ttl: CACHE_TTL.details, signal, priority });
 }
 
 function initImageLazyLoad() {
@@ -859,6 +928,10 @@ function renderRoute({ fresh = false } = {}) {
     pendingScrollRestore = revisit && !fresh ? (scrollMemory.get(currentEntryKey) ?? null) : null;
     closeTransientPanels();
     if (route.name !== 'anime') stopDetailActivity();
+    if (!['search', 'browse', 'studio'].includes(route.name)) {
+        cancelResultsRequest();
+        if (resultsRequestToken) { resultsRequestToken++; showLoading(false); }
+    }
 
     switch (route.name) {
         case 'home':
@@ -1134,7 +1207,7 @@ async function fetchSearchSuggestions(queryText) {
     }
 }
 
-async function getDashboardBundle() {
+async function getDashboardBundle({ priority = 'interactive' } = {}) {
     const discoverDefs = [];
     const discoverArgs = [];
     const variables = { perPage: 20 };
@@ -1158,14 +1231,14 @@ async function getDashboardBundle() {
     return aniRequest(query, variables, {
         cacheKey: `dashboard:v2:${adultContentEnabled}:${selectedDiscoverSeason}:${selectedDiscoverYear}:${selectedDiscoverGenre}`,
         ttl: CACHE_TTL.trending,
-        priority: 'interactive',
+        priority,
     });
 }
 
 async function loadDashboardRows({ silent = false } = {}) {
     if (!silent) showLoading(true);
     try {
-        const data = await getDashboardBundle();
+        const data = await getDashboardBundle({ priority: parseRoute().name === 'home' ? 'interactive' : 'background' });
         dashboardPools.trending = data?.trending?.media || [];
         dashboardPools.top = data?.top?.media || [];
         dashboardPools.discover = data?.discover?.media || [];
@@ -1500,10 +1573,18 @@ function executeGlobalSearch(query) {
 function viewStudioGrid(studioId, studioName = '') {
     navigate(studioHash(studioId, studioName));
 }
+let resultsAbortController = null;
+function cancelResultsRequest() {
+    resultsAbortController?.abort();
+    resultsAbortController = null;
+}
 async function fetchExpandedGridData() {
     const token = ++resultsRequestToken;
     const grid = document.getElementById('search-results-grid');
     if (!grid || !currentActiveRowTarget) return;
+    cancelResultsRequest();
+    resultsAbortController = new AbortController();
+    const request = { signal: resultsAbortController.signal, priority: 'interactive' };
     showLoading(true);
     grid.innerHTML = '<div class="spinner"></div>';
     const filters = currentActiveRowTarget === 'search' ? {
@@ -1517,11 +1598,11 @@ async function fetchExpandedGridData() {
     };
     try {
         let data;
-        if (currentActiveRowTarget === 'trending') data = await getTrending(currentPage, PAGE_SIZE);
-        else if (currentActiveRowTarget === 'top') data = await getTopRated(currentPage, PAGE_SIZE);
-        else if (currentActiveRowTarget === 'discover') data = await getDiscover(currentPage, PAGE_SIZE);
-        else if (currentActiveRowTarget === 'studio') data = await getStudioAnime(selectedStudioId, currentPage, PAGE_SIZE, filters);
-        else data = await searchAnime(currentSearchQuery, currentPage, SEARCH_PAGE_SIZE, filters);
+        if (currentActiveRowTarget === 'trending') data = await getTrending(currentPage, PAGE_SIZE, request);
+        else if (currentActiveRowTarget === 'top') data = await getTopRated(currentPage, PAGE_SIZE, request);
+        else if (currentActiveRowTarget === 'discover') data = await getDiscover(currentPage, PAGE_SIZE, request);
+        else if (currentActiveRowTarget === 'studio') data = await getStudioAnime(selectedStudioId, currentPage, PAGE_SIZE, filters, request);
+        else data = await searchAnime(currentSearchQuery, currentPage, SEARCH_PAGE_SIZE, filters, request.signal);
         if (token !== resultsRequestToken) return;
         if (currentActiveRowTarget === 'studio' && data.studioName && data.studioName !== selectedStudioName) {
             selectedStudioName = data.studioName;
@@ -1532,7 +1613,7 @@ async function fetchExpandedGridData() {
         resultsPageInfo = data.Page.pageInfo;
         renderResultsPage(grid, data.Page.media || [], resultsPageInfo);
     } catch (error) {
-        if (token !== resultsRequestToken) return;
+        if (token !== resultsRequestToken || error.name === 'AbortError') return;
         console.error('Grid error:', error);
         grid.innerHTML = `<div class="empty-state api-error">${escapeHtml(error.message || 'Unable to load results.')}<button id="grid-retry-btn" class="inline-retry-btn">Retry</button></div>`;
         document.getElementById('grid-retry-btn')?.addEventListener('click', fetchExpandedGridData);
@@ -1619,7 +1700,7 @@ async function showAnimeDetails(animeId) {
     showView('view-details');
     showLoading(true);
     try {
-        const data = await getAnimeDetails(animeId);
+        const data = await getAnimeDetails(animeId, { signal: detailSignal() });
         if (token !== detailRequestToken) return;
         const anime = data?.Media;
         if (!anime) throw new AniListError('This anime could not be found.');
@@ -1632,7 +1713,7 @@ async function showAnimeDetails(animeId) {
         if (getDetailPrefs().timeline) renderDetailSection('timeline', anime);
         else document.getElementById('chrono-timeline').innerHTML = '';
     } catch (error) {
-        if (token !== detailRequestToken) return;
+        if (token !== detailRequestToken || error.name === 'AbortError') return;
         console.error('Detail error:', error);
         setPageTitle();
         document.getElementById('detail-title').textContent = error.message || 'Unable to load anime details.';
@@ -1896,7 +1977,7 @@ async function openStaffPortfolioPanel(personId, personName) {
     modal.onclick = event => { if (event.target === modal) modal.classList.add('hidden'); };
     try {
         const query = `query ($id: Int!) { Staff(id: $id) { id name { full } primaryOccupations staffMedia(page: 1, perPage: 30, type: ANIME, sort: [POPULARITY_DESC]) { nodes { id isAdult popularity title { romaji english native } coverImage { medium } } } } }`;
-        const data = await aniRequest(query, { id: Number(personId) }, { cacheKey: `staff-media:${personId}`, ttl: CACHE_TTL.details });
+        const data = await aniRequest(query, { id: Number(personId) }, { cacheKey: `staff-media:${personId}`, ttl: CACHE_TTL.details, priority: 'interactive' });
         const anime = (data.Staff?.staffMedia?.nodes || []).filter(item => adultContentEnabled || !item.isAdult);
         roles.innerHTML = '';
         if (!anime.length) { roles.innerHTML = '<div class="empty-state">No anime staff credits found.</div>'; return; }
@@ -1923,7 +2004,7 @@ async function openVoiceActorPortfolioPanel(personId, personName) {
     modal.onclick = event => { if (event.target === modal) modal.classList.add('hidden'); };
     try {
         const query = `query ($id: Int!) { Staff(id: $id) { id name { full } characters(page: 1, perPage: 25, sort: [FAVOURITES_DESC]) { edges { node { id name { full } } media { id isAdult type popularity title { romaji english native } } } } } }`;
-        const data = await aniRequest(query, { id: Number(personId) }, { cacheKey: `staff:${personId}`, ttl: CACHE_TTL.details });
+        const data = await aniRequest(query, { id: Number(personId) }, { cacheKey: `staff:${personId}`, ttl: CACHE_TTL.details, priority: 'interactive' });
         const edges = data.Staff?.characters?.edges || [];
         roles.innerHTML = '';
         const visible = edges.filter(edge => edge.media?.length && (adultContentEnabled || edge.media.some(anime => !anime.isAdult)));
@@ -2042,7 +2123,7 @@ async function fetchScheduleForDate(date) {
         const all = [];
         for (let page = 1; page <= 5; page++) {
             const variables = { start: Math.floor(start.getTime() / 1000), end: Math.floor(end.getTime() / 1000), page, perPage: 50 };
-            const data = await aniRequest(query, variables, { cacheKey: `schedule:${adultContentEnabled}:${start.toISOString().slice(0,10)}:${page}`, ttl: CACHE_TTL.schedule });
+            const data = await aniRequest(query, variables, { cacheKey: `schedule:${adultContentEnabled}:${start.toISOString().slice(0,10)}:${page}`, ttl: CACHE_TTL.schedule, priority: 'interactive' });
             all.push(...(data.Page.airingSchedules || []));
             if (!data.Page.pageInfo.hasNextPage) break;
         }
