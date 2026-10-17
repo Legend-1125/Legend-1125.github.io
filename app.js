@@ -118,7 +118,15 @@ const suggestionsDropdown = document.getElementById('search-suggestions');
 const loading = document.getElementById('loading');
 const mainNav = document.getElementById('main-nav');
 
-function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+function abortError() { return new DOMException('Aborted', 'AbortError'); }
+function delay(ms, signal) {
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) { reject(abortError()); return; }
+        const onAbort = () => { clearTimeout(timer); reject(abortError()); };
+        const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+        signal?.addEventListener('abort', onAbort, { once: true });
+    });
+}
 function getCurrentSeason() {
     const month = new Date().getMonth();
     if (month < 3) return 'WINTER';
@@ -349,7 +357,8 @@ async function aniRequest(query, variables = {}, options = {}) {
     if (aniInflight.has(inflightKey)) return aniInflight.get(inflightKey);
 
     const task = aniQueue = aniQueue.catch(() => {}).then(async () => {
-        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        // A cancelled request gives up its place in the queue immediately.
+        if (signal?.aborted) throw abortError();
         const stale = cacheKey ? cacheGetStale(cacheKey) : null;
         // AniList documents a temporary degraded limit of 30 requests/minute.
         // Keep the client below that ceiling and stop retry storms when the API says 429.
@@ -357,8 +366,8 @@ async function aniRequest(query, variables = {}, options = {}) {
         const waitForSpacing = baseSpacing - (Date.now() - aniLastRequestAt);
         const waitForReset = aniRemaining <= 1 && aniResetAt > Date.now() ? aniResetAt - Date.now() + 500 : 0;
         const wait = Math.max(0, aniCooldownUntil - Date.now(), waitForSpacing, waitForReset);
-        if (wait) await delay(wait);
-        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        if (wait) await delay(wait, signal);
+        if (signal?.aborted) throw abortError();
 
         let response;
         try {
@@ -389,9 +398,13 @@ async function aniRequest(query, variables = {}, options = {}) {
         }
         if (cacheKey && ttl) cacheSet(cacheKey, payload.data, ttl);
         return payload.data;
-    }).finally(() => aniInflight.delete(inflightKey));
+    }).finally(() => { if (aniInflight.get(inflightKey) === task) aniInflight.delete(inflightKey); });
 
     aniInflight.set(inflightKey, task);
+    // Never hand a cancelled request to a later caller asking for the same data.
+    signal?.addEventListener('abort', () => {
+        if (aniInflight.get(inflightKey) === task) aniInflight.delete(inflightKey);
+    }, { once: true });
     return task;
 }
 
@@ -586,6 +599,7 @@ async function getStudioAnime(studioId, page = 1, perPage = PAGE_SIZE, filters =
     if (scoreFloor) items = items.filter(item => Number(item.averageScore || 0) >= scoreFloor);
 
     return {
+        studioName: data.Studio?.name || '',
         Page: {
             pageInfo: data.Studio?.media?.pageInfo || { total: items.length, currentPage: page, lastPage: page, hasNextPage: false, perPage },
             media: items,
@@ -625,34 +639,213 @@ function initImageLazyLoad() {
     }))).observe(document.body, { childList: true, subtree: true });
 }
 
-function syncViewRoute(targetViewId, pushState = true, extraState = {}) {
-    views.forEach(view => view.classList.add('hidden'));
-    document.getElementById(targetViewId)?.classList.remove('hidden');
-    navButtons.forEach(button => button.classList.toggle('active', button.dataset.tab === targetViewId));
-    if (pushState) history.pushState({ view: targetViewId, ...extraState }, '', '');
-    scrollPageToTop();
+/* ==========================================
+   ROUTING
+   Every view has its own #/ address, so pages can be shared, bookmarked,
+   refreshed and reached with Back/Forward. Hash routes need no server
+   configuration, which keeps the site working on GitHub Pages.
+
+     #/                         Home
+     #/anime/154587             Anime details
+     #/search?q=frieren&page=2  Search results
+     #/browse/trending          Trending | top | discover grids
+     #/studio/11?name=Madhouse  Studio grid
+     #/list  #/schedule  #/news
+   ========================================== */
+const VIEW_ROUTES = Object.freeze({
+    'view-home': '#/',
+    'view-history': '#/list',
+    'view-schedule': '#/schedule',
+    'view-news': '#/news',
+});
+const BROWSE_TARGETS = new Set(['trending', 'top', 'discover']);
+const BROWSE_TITLES = Object.freeze({ trending: 'Trending Now', top: 'Top Rated', discover: 'Discover' });
+const SITE_TITLE = 'AniZone';
+const scrollMemory = new Map();
+let lastKnownScrollY = 0;
+let currentEntryKey = null;
+let currentEntryDepth = 0;
+let entryKeyCounter = 0;
+let pendingScrollRestore = null;
+
+function routeHash(path, params = {}) {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+        if (value === null || value === undefined || value === '') return;
+        if (key === 'page' && Number(value) <= 1) return;
+        query.set(key, String(value));
+    });
+    const queryString = query.toString();
+    return `#${path}${queryString ? `?${queryString}` : ''}`;
 }
-function handleBrowserBackNavigation(event) {
-    const state = event.state;
-    if (!state) return;
-    if (state.view === 'view-details' && state.animeId) viewSingleAnime(state.animeId, false);
-    else if (state.view === 'view-results' && state.target) restoreResultsGridState(state);
-    else {
-        syncViewRoute(state.view, false);
-        if (state.view === 'view-history') renderHistoryLogGrid();
-        if (state.view === 'view-schedule') initScheduleView();
+function animeHash(id) { return routeHash(`/anime/${Number(id)}`); }
+function studioHash(id, name = '', page = 1) { return routeHash(`/studio/${Number(id)}`, { name, page }); }
+
+function parseRoute(hash = location.hash) {
+    const raw = String(hash || '').replace(/^#\/?/, '');
+    const queryIndex = raw.indexOf('?');
+    const path = queryIndex === -1 ? raw : raw.slice(0, queryIndex);
+    const params = new URLSearchParams(queryIndex === -1 ? '' : raw.slice(queryIndex + 1));
+    let segments;
+    try { segments = path.split('/').filter(Boolean).map(decodeURIComponent); }
+    catch { return { name: 'not-found' }; }
+    const [section, id] = segments;
+    const page = Math.max(1, Number.parseInt(params.get('page'), 10) || 1);
+    const numericId = /^\d+$/.test(id || '') ? Number(id) : null;
+
+    if (!section) return { name: 'home' };
+    if (section === 'anime' && numericId) return { name: 'anime', id: numericId };
+    if (section === 'search') {
+        const query = (params.get('q') || '').trim();
+        return query ? { name: 'search', query, page } : { name: 'not-found' };
+    }
+    if (section === 'browse' && BROWSE_TARGETS.has(id)) return { name: 'browse', target: id, page };
+    if (section === 'studio' && numericId) return { name: 'studio', id: numericId, studioName: params.get('name') || '', page };
+    if (['list', 'schedule', 'news'].includes(section) && segments.length === 1) return { name: section };
+    return { name: 'not-found' };
+}
+
+function navigate(hash, { replace = false } = {}) {
+    if (replace) {
+        history.replaceState({ azDepth: currentEntryDepth }, '', hash);
+        renderRoute();
+    } else if (hash === location.hash) {
+        // Same address (e.g. clicking Home while on Home): show it fresh from the top.
+        renderRoute({ fresh: true });
+    } else {
+        location.hash = hash; // fires hashchange -> renderRoute
     }
 }
-function restoreResultsGridState(state) {
-    currentActiveRowTarget = state.target;
-    currentPage = state.page || 1;
-    currentSearchQuery = state.query || currentSearchQuery;
-    selectedStudioId = state.studioId || selectedStudioId;
-    selectedStudioName = state.studioName || selectedStudioName;
+
+// Gives each history entry a key so Back/Forward can restore its scroll position,
+// and records how deep into the site the visitor is so our Back buttons never
+// send someone who arrived from a shared link away from AniZone.
+function trackHistoryEntry() {
+    if (currentEntryKey) scrollMemory.set(currentEntryKey, lastKnownScrollY);
+    const state = history.state;
+    if (state?.azKey) {
+        currentEntryKey = state.azKey;
+        currentEntryDepth = Number(state.azDepth) || 0;
+        return true;
+    }
+    const depth = Number.isFinite(state?.azDepth) ? state.azDepth : (currentEntryKey ? currentEntryDepth + 1 : 0);
+    currentEntryKey = `${Date.now().toString(36)}-${++entryKeyCounter}`;
+    currentEntryDepth = depth;
+    history.replaceState({ azKey: currentEntryKey, azDepth: depth }, '', location.href);
+    return false;
+}
+
+function goBack() {
+    if (currentEntryDepth > 0) history.back();
+    else navigate('#/', { replace: true });
+}
+
+function setPageTitle(text = '') {
+    document.title = text ? `${text} · ${SITE_TITLE}` : SITE_TITLE;
+}
+
+function showView(targetViewId) {
+    views.forEach(view => view.classList.toggle('hidden', view.id !== targetViewId));
+    navButtons.forEach(button => button.classList.toggle('active', button.dataset.tab === targetViewId));
+    if (pendingScrollRestore == null) scrollPageToTop();
+}
+
+function restorePendingScroll() {
+    if (pendingScrollRestore == null) return;
+    const top = pendingScrollRestore;
+    pendingScrollRestore = null;
+    requestAnimationFrame(() => window.scrollTo({ top, left: 0, behavior: 'instant' }));
+}
+
+function closeTransientPanels() {
+    document.getElementById('va-modal')?.classList.add('hidden');
+    document.getElementById('detail-preferences-panel')?.classList.add('hidden');
+    suggestionsDropdown?.classList.add('hidden');
+    const hamburger = document.getElementById('hamburger-btn');
+    hamburger?.setAttribute('aria-expanded', 'false');
+    hamburger?.classList.remove('open');
+    document.getElementById('nav-menu-panel')?.classList.remove('open-panel');
+}
+
+function renderRoute({ fresh = false } = {}) {
+    const route = parseRoute();
+    if (route.name === 'not-found') { navigate('#/', { replace: true }); return; }
+    const revisit = trackHistoryEntry();
+    pendingScrollRestore = revisit && !fresh ? (scrollMemory.get(currentEntryKey) ?? null) : null;
+    closeTransientPanels();
+    if (route.name !== 'anime') stopDetailActivity();
+
+    switch (route.name) {
+        case 'home':
+            setPageTitle();
+            showView('view-home');
+            restorePendingScroll();
+            break;
+        case 'list':
+            setPageTitle('My List');
+            showView('view-history');
+            renderHistoryLogGrid();
+            restorePendingScroll();
+            break;
+        case 'schedule':
+            pendingScrollRestore = null;
+            setPageTitle('Schedule');
+            showView('view-schedule');
+            initScheduleView();
+            break;
+        case 'news':
+            pendingScrollRestore = null;
+            setPageTitle('News');
+            showView('view-news');
+            loadNews();
+            break;
+        case 'anime':
+            pendingScrollRestore = null;
+            showAnimeDetails(route.id);
+            break;
+        default:
+            showResultsRoute(route);
+    }
+}
+
+function showResultsRoute(route) {
+    if (route.name === 'search') {
+        if (currentActiveRowTarget !== 'search' || currentSearchQuery !== route.query) {
+            selectedSearchYear = '';
+            selectedSearchOrder = 'default';
+        }
+        currentSearchQuery = route.query;
+        currentActiveRowTarget = 'search';
+        if (searchInput && document.activeElement !== searchInput) searchInput.value = route.query;
+        clearSearchBtn?.classList.toggle('hidden', !route.query);
+        setPageTitle(`Search: ${route.query}`);
+    } else if (route.name === 'studio') {
+        if (selectedStudioId !== route.id) selectedStudioName = '';
+        selectedStudioId = route.id;
+        selectedStudioName = route.studioName || selectedStudioName;
+        currentActiveRowTarget = 'studio';
+        setPageTitle(selectedStudioName || 'Studio');
+    } else {
+        currentActiveRowTarget = route.target;
+        setPageTitle(BROWSE_TITLES[route.target]);
+    }
+    currentPage = route.page;
     configureResultsHeader(currentActiveRowTarget);
-    syncViewRoute('view-results', false);
+    showView('view-results');
     fetchExpandedGridData();
 }
+
+function resultsRouteHash(page = currentPage) {
+    if (currentActiveRowTarget === 'search') return routeHash('/search', { q: currentSearchQuery, page });
+    if (currentActiveRowTarget === 'studio') return studioHash(selectedStudioId, selectedStudioName, page);
+    return routeHash(`/browse/${currentActiveRowTarget}`, { page });
+}
+// Keeps the address bar in step after a filter change without adding a history entry.
+function syncResultsUrl() {
+    const hash = resultsRouteHash(currentPage);
+    if (hash !== location.hash) history.replaceState(history.state, '', hash);
+}
+
 function configureResultsHeader(target) {
     const title = document.getElementById('grid-title');
     const filters = document.getElementById('global-filters-container');
@@ -674,27 +867,22 @@ function configureResultsHeader(target) {
     } else {
         filters?.classList.remove('hidden');
         discoverFilters?.classList.add('hidden');
-        if (target === 'studio') title.textContent = `Studio: ${selectedStudioName}`;
+        if (target === 'studio') title.textContent = selectedStudioName ? `Studio: ${selectedStudioName}` : 'Studio';
     }
 }
 
 function initNavigation() {
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+    window.addEventListener('scroll', () => { lastKnownScrollY = window.scrollY; }, { passive: true });
+    window.addEventListener('hashchange', () => renderRoute());
     navButtons.forEach(button => button.addEventListener('click', () => {
-        const tab = button.dataset.tab;
-        if (!tab) return;
-        syncViewRoute(tab, true);
-        if (tab === 'view-history') renderHistoryLogGrid();
-        if (tab === 'view-schedule') initScheduleView();
-        const hamburger = document.getElementById('hamburger-btn');
-        const panel = document.getElementById('nav-menu-panel');
-        hamburger?.setAttribute('aria-expanded', 'false');
-        hamburger?.classList.remove('open');
-        panel?.classList.remove('open-panel');
+        const route = VIEW_ROUTES[button.dataset.tab];
+        if (route) navigate(route);
     }));
-    document.getElementById('logo-btn')?.addEventListener('click', () => syncViewRoute('view-home', true));
+    document.getElementById('logo-btn')?.addEventListener('click', () => navigate('#/'));
     document.getElementById('shuffle-btn')?.addEventListener('click', triggerRandomShuffle);
-    document.getElementById('grid-back-btn')?.addEventListener('click', () => history.back());
-    document.getElementById('back-btn')?.addEventListener('click', () => history.back());
+    document.getElementById('grid-back-btn')?.addEventListener('click', goBack);
+    document.getElementById('back-btn')?.addEventListener('click', goBack);
     const hamburger = document.getElementById('hamburger-btn');
     const panel = document.getElementById('nav-menu-panel');
     hamburger?.addEventListener('click', () => {
@@ -751,8 +939,8 @@ function updateVisibleTitlesForLanguage() {
         const title = displayTitle(anime);
         const alt = secondaryTitle(anime);
         titleNode.innerHTML = `${escapeHtml(title)}${alt ? `<span>${escapeHtml(alt)}</span>` : ''}`;
-        const image = card.querySelector('img');
-        if (image) image.alt = title;
+        const removeButton = card.querySelector('.card-eraser-btn');
+        if (removeButton) removeButton.setAttribute('aria-label', `Remove ${title} from history`);
     });
     if (heroSlides[heroSlideIndex]) renderHeroSlide(heroSlideIndex);
     if (currentDetailAnime && !document.getElementById('view-details')?.classList.contains('hidden')) {
@@ -914,17 +1102,22 @@ function createAnimeCard(anime, isHistory = false) {
     card._animeData = anime;
     const title = displayTitle(anime);
     const alt = secondaryTitle(anime);
-    card.innerHTML = `<img src="${escapeHtml(imageUrl(anime))}" alt="${escapeHtml(title)}" loading="lazy">${anime.isAdult ? '<span class="adult-card-badge">18+</span>' : ''}<div class="anime-card-overlay"></div><div class="anime-card-title">${escapeHtml(title)}${alt ? `<span>${escapeHtml(alt)}</span>` : ''}</div>`;
+    // A real link: reachable with Tab, opens in a new tab with middle-click or long-press,
+    // and its address can be copied and shared. The poster is decorative because the
+    // title text inside the link already names it.
+    card.innerHTML = `<a class="anime-card-link" href="${animeHash(anime.id)}"><img src="${escapeHtml(imageUrl(anime))}" alt="" loading="lazy">${anime.isAdult ? '<span class="adult-card-badge">18+</span>' : ''}<div class="anime-card-overlay"></div><div class="anime-card-title">${escapeHtml(title)}${alt ? `<span>${escapeHtml(alt)}</span>` : ''}</div></a>`;
     if (anime.isAdult) card.classList.add('adult-card');
     if (isHistory) {
+        // Kept outside the link: a button nested inside a link is invalid HTML.
         const button = document.createElement('button');
+        button.type = 'button';
         button.className = 'card-eraser-btn';
-        button.title = 'Remove';
+        button.title = 'Remove from history';
+        button.setAttribute('aria-label', `Remove ${title} from history`);
         button.textContent = '✕';
-        button.addEventListener('click', event => { event.stopPropagation(); removeAnimeFromHistoryLog(anime.id); });
+        button.addEventListener('click', () => removeAnimeFromHistoryLog(anime.id));
         card.appendChild(button);
     }
-    card.addEventListener('click', () => viewSingleAnime(anime.id));
     return card;
 }
 
@@ -1155,6 +1348,7 @@ function initGridDiscoverFilters() {
     Object.entries(bindings).forEach(([id, setter]) => document.getElementById(id)?.addEventListener('change', event => {
         setter(event.target.value);
         currentPage = 1;
+        syncResultsUrl();
         syncGridDiscoverFilters();
         fetchExpandedGridData();
     }));
@@ -1173,6 +1367,7 @@ function initGridDiscoverFilters() {
         }
         syncGridDiscoverFilters();
         currentPage = 1;
+        syncResultsUrl();
         fetchExpandedGridData();
     });
 }
@@ -1181,40 +1376,21 @@ function initGlobalFilterListeners() {
     ['filter-type', 'filter-status', 'filter-rating', 'filter-order'].forEach(id => document.getElementById(id)?.addEventListener('change', () => {
         if (currentActiveRowTarget && !document.getElementById('view-results')?.classList.contains('hidden')) {
             currentPage = 1;
+            syncResultsUrl();
             fetchExpandedGridData();
         }
     }));
 }
 function expandRowToGrid(target) {
-    if (!target) return;
-    currentActiveRowTarget = target;
-    currentPage = 1;
-    configureResultsHeader(target);
-    syncViewRoute('view-results', true, { target, page: 1 });
-    fetchExpandedGridData();
+    if (BROWSE_TARGETS.has(target)) navigate(routeHash(`/browse/${target}`));
 }
-function executeGlobalSearch(query, page = 1) {
-    const startingNewSearch = currentActiveRowTarget !== 'search' || currentSearchQuery !== query.trim();
-    currentSearchQuery = query.trim();
-    currentActiveRowTarget = 'search';
-    if (startingNewSearch) {
-        selectedSearchYear = '';
-        selectedSearchOrder = 'default';
-    }
-    currentPage = page;
+function executeGlobalSearch(query) {
+    const text = String(query || '').trim();
     suggestionsDropdown?.classList.add('hidden');
-    configureResultsHeader('search');
-    syncViewRoute('view-results', true, { target: 'search', query: currentSearchQuery, page });
-    fetchExpandedGridData();
+    if (text) navigate(routeHash('/search', { q: text }));
 }
-function viewStudioGrid(studioId, studioName) {
-    currentActiveRowTarget = 'studio';
-    selectedStudioId = studioId;
-    selectedStudioName = studioName;
-    currentPage = 1;
-    configureResultsHeader('studio');
-    syncViewRoute('view-results', true, { target: 'studio', studioId, studioName, page: 1 });
-    fetchExpandedGridData();
+function viewStudioGrid(studioId, studioName = '') {
+    navigate(studioHash(studioId, studioName));
 }
 async function fetchExpandedGridData() {
     const token = ++resultsRequestToken;
@@ -1245,6 +1421,12 @@ async function fetchExpandedGridData() {
         else if (currentActiveRowTarget === 'studio') data = await getStudioAnime(selectedStudioId, currentPage, PAGE_SIZE, filters);
         else data = await searchAnime(currentSearchQuery, currentPage, SEARCH_PAGE_SIZE, filters);
         if (token !== resultsRequestToken) return;
+        if (currentActiveRowTarget === 'studio' && data.studioName && data.studioName !== selectedStudioName) {
+            selectedStudioName = data.studioName;
+            configureResultsHeader('studio');
+            setPageTitle(selectedStudioName);
+            syncResultsUrl();
+        }
         resultsPageInfo = data.Page.pageInfo;
         renderResultsPage(grid, data.Page.media || [], resultsPageInfo);
     } catch (error) {
@@ -1271,6 +1453,7 @@ function renderResultsPage(grid, items, pageInfo) {
         : `${Math.max(items.length, (Number(pageInfo?.currentPage || currentPage) - 1) * perPage + items.length).toLocaleString()}+ Titles`;
     document.getElementById('results-count').textContent = currentActiveRowTarget === 'search' ? totalLabel : `${apiTotal.toLocaleString()} Titles`;
     updatePaginationControls(pageInfo);
+    restorePendingScroll();
 }
 function updatePaginationControls(pageInfo) {
     const previous = document.getElementById('prev-page-btn');
@@ -1280,41 +1463,91 @@ function updatePaginationControls(pageInfo) {
     previous.disabled = !pageInfo || currentPage <= 1;
     next.disabled = !pageInfo?.hasNextPage;
     indicator.textContent = `Page ${currentPage}`;
-    previous.onclick = () => { if (currentPage > 1) { currentPage--; updateRoutePage(); fetchExpandedGridData(); scrollPageToTop(); } };
-    next.onclick = () => { if (pageInfo?.hasNextPage) { currentPage++; updateRoutePage(); fetchExpandedGridData(); scrollPageToTop(); } };
-}
-function updateRoutePage() {
-    const state = { ...(history.state || {}), page: currentPage };
-    history.replaceState(state, '', '');
+    previous.onclick = () => { if (currentPage > 1) navigate(resultsRouteHash(currentPage - 1)); };
+    next.onclick = () => { if (pageInfo?.hasNextPage) navigate(resultsRouteHash(currentPage + 1)); };
 }
 
-async function viewSingleAnime(animeId, pushState = true) {
+function viewSingleAnime(animeId) { navigate(animeHash(animeId)); }
+
+// Each visit to an anime page gets a token and an AbortController. Anything that
+// finishes after the visitor has moved on is discarded instead of being drawn
+// onto the wrong anime's page, and queued background requests are cancelled.
+let detailRequestToken = 0;
+let detailAbortController = null;
+
+function detailSignal() { return detailAbortController?.signal; }
+function isCurrentDetail(anime) { return Boolean(anime) && currentDetailAnime?.id === anime.id; }
+
+function stopDetailActivity() {
+    detailAbortController?.abort();
+    detailAbortController = null;
+    clearInterval(countdownTimer);
+    // A playing trailer keeps making sound in a hidden view, so remove it.
+    const trailer = document.getElementById('detail-trailer');
+    if (trailer?.querySelector('iframe')) trailer.innerHTML = '';
+}
+
+function resetDetailView() {
+    currentDetailAnime = null;
+    currentCastEdges = [];
+    detailSectionState = { animeId: null, loaded: new Set() };
+    document.getElementById('detail-backdrop').style.backgroundImage = 'none';
+    const poster = document.getElementById('detail-poster');
+    poster.removeAttribute('src');
+    poster.alt = '';
+    document.getElementById('detail-title').textContent = 'Loading…';
+    document.getElementById('detail-synopsis').textContent = '';
+    document.querySelector('#view-details .meta-badges')?.classList.add('hidden');
+    document.getElementById('detail-adult-warning')?.classList.add('hidden');
+    document.getElementById('detail-studio').textContent = '';
+    document.getElementById('badge-status').textContent = '';
+    document.getElementById('streaming-links-container').innerHTML = '';
+    const spinner = '<div class="spinner"></div>';
+    document.getElementById('characters-list').innerHTML = spinner;
+    document.getElementById('chrono-timeline').innerHTML = spinner;
+    ['episode-countdown', 'detail-trailer', 'detail-themes', 'manga-continuation', 'detail-staff', 'detail-recommendations']
+        .forEach(id => { const box = document.getElementById(id); if (box) box.innerHTML = ''; });
+}
+
+async function showAnimeDetails(animeId) {
+    const token = ++detailRequestToken;
+    stopDetailActivity();
+    detailAbortController = new AbortController();
+    resetDetailView();
+    showView('view-details');
     showLoading(true);
-    syncViewRoute('view-details', false);
-    if (pushState) history.pushState({ view: 'view-details', animeId }, '', '');
-    document.getElementById('characters-list').innerHTML = '<div class="spinner"></div>';
-    document.getElementById('chrono-timeline').innerHTML = '<div class="spinner"></div>';
     try {
         const data = await getAnimeDetails(animeId);
-        const anime = data.Media;
-        currentDetailAnime = anime;
+        if (token !== detailRequestToken) return;
+        const anime = data?.Media;
+        if (!anime) throw new AniListError('This anime could not be found.');
         if (!adultContentEnabled && anime.isAdult) throw new AniListError('Adult content is hidden. Enable the 18+ toggle to view this title.');
+        currentDetailAnime = anime;
+        setPageTitle(displayTitle(anime));
         renderAnimeDetails(anime);
         renderCastProfiles(anime.characters?.edges || []);
         appendAnimeToClickHistoryLog(anime);
-        if(getDetailPrefs().timeline) renderDetailSection('timeline',anime); else document.getElementById('chrono-timeline').innerHTML='';
+        if (getDetailPrefs().timeline) renderDetailSection('timeline', anime);
+        else document.getElementById('chrono-timeline').innerHTML = '';
     } catch (error) {
+        if (token !== detailRequestToken) return;
         console.error('Detail error:', error);
+        setPageTitle();
         document.getElementById('detail-title').textContent = error.message || 'Unable to load anime details.';
         document.getElementById('characters-list').innerHTML = '<div class="empty-state">Cast unavailable.</div>';
         document.getElementById('chrono-timeline').innerHTML = '<div class="empty-state">Timeline unavailable.</div>';
-    } finally { showLoading(false); }
+    } finally {
+        if (token === detailRequestToken) showLoading(false);
+    }
 }
 function renderAnimeDetails(anime) {
     const poster = imageUrl(anime);
     const backdrop = anime.bannerImage || poster;
     document.getElementById('detail-backdrop').style.backgroundImage = `url('${backdrop}')`;
-    document.getElementById('detail-poster').src = poster;
+    const posterImage = document.getElementById('detail-poster');
+    posterImage.src = poster;
+    posterImage.alt = `${displayTitle(anime)} poster`;
+    document.querySelector('#view-details .meta-badges')?.classList.remove('hidden');
     const primary = displayTitle(anime);
     const alternate = secondaryTitle(anime);
     document.getElementById('detail-title').innerHTML = `${escapeHtml(primary)}${alternate ? `<span class="detail-alt-title">${escapeHtml(alternate)}</span>` : ''}`;
@@ -1357,10 +1590,10 @@ function renderStudioLinks(studios) {
     container.innerHTML = '';
     if (!studios.length) { container.textContent = 'Unknown Studio'; return; }
     studios.forEach((studio, index) => {
-        const link = document.createElement('span');
+        const link = document.createElement('a');
         link.className = 'studio-link';
+        link.href = studioHash(studio.id, studio.name);
         link.textContent = studio.name;
-        link.addEventListener('click', () => viewStudioGrid(studio.id, studio.name));
         container.appendChild(link);
         if (index < studios.length - 1) container.appendChild(document.createTextNode(', '));
     });
@@ -1457,6 +1690,8 @@ function isMainFranchiseMatch(rootAnime, candidate) {
 
 async function fetchFranchiseTimeline(rootAnime) {
     const container = document.getElementById('chrono-timeline');
+    const signal = detailSignal();
+    const isStale = () => !isCurrentDetail(rootAnime) || signal?.aborted;
     // A chronological franchise timeline should represent the main animated
     // continuity. AniList's CHARACTER, OTHER and SIDE_STORY edges often point to
     // music videos, promotional shorts, parody clips, or loosely associated media.
@@ -1509,7 +1744,9 @@ async function fetchFranchiseTimeline(rootAnime) {
             const data = await aniRequest(query, { ids }, {
                 cacheKey: `main-relations:${ids.slice().sort((a, b) => a - b).join(',')}`,
                 ttl: CACHE_TTL.details,
+                signal,
             });
+            if (isStale()) return;
             (data.Page?.media || []).forEach(anime => {
                 const existing = seen.get(anime.id) || {};
                 seen.set(anime.id, { ...existing, ...anime, relation: existing.relation || 'Related' });
@@ -1517,9 +1754,11 @@ async function fetchFranchiseTimeline(rootAnime) {
             });
         }
 
+        if (isStale()) return;
         const nodes = [...seen.values()].sort((a, b) => dateNumber(a.startDate) - dateNumber(b.startDate) || a.id - b.id);
         renderTimelineLayout(nodes, rootAnime.id);
     } catch (error) {
+        if (error.name === 'AbortError' || isStale()) return;
         console.error('Timeline error:', error);
         const partial = [...seen.values()].sort((a, b) => dateNumber(a.startDate) - dateNumber(b.startDate));
         if (partial.length > 1) renderTimelineLayout(partial, rootAnime.id);
@@ -1622,14 +1861,10 @@ async function triggerRandomShuffle() {
         const anime = data.Page?.media?.[0];
         if (!anime) throw new Error('No random title found. Please try again.');
 
-        currentDetailAnime = anime;
-        syncViewRoute('view-details', false);
-        history.pushState({ view: 'view-details', animeId: anime.id }, '', '');
-        renderAnimeDetails(anime);
-        renderCastProfiles(anime.characters?.edges || []);
-        appendAnimeToClickHistoryLog(anime);
-        if (getDetailPrefs().timeline) renderDetailSection('timeline', anime);
-        else document.getElementById('chrono-timeline').innerHTML = '';
+        // The pick already has every detail field. Store it where the anime page
+        // looks, so opening its address needs no second request.
+        cacheSet(`detail:${anime.id}`, { Media: anime }, CACHE_TTL.details);
+        viewSingleAnime(anime.id);
     } catch (error) {
         siteAlert(error.message || 'Unable to choose a surprise anime right now.');
     } finally { showLoading(false); }
@@ -1746,11 +1981,10 @@ function initApp() {
             renderHistoryLogGrid();
         }
     });
-    window.addEventListener('popstate', handleBrowserBackNavigation);
     window.addEventListener('scroll', () => mainNav?.classList.toggle('scrolled', window.scrollY > 20));
-    loadDashboardRows();
-    if (history.state?.view) handleBrowserBackNavigation({ state: history.state });
-    else history.replaceState({ view: 'view-home' }, '', '');
+    // Home rows load in the background on every page; the full-screen loader is
+    // only shown when Home is the page being opened.
+    loadDashboardRows({ silent: parseRoute().name !== 'home' });
 }
 
 document.addEventListener('DOMContentLoaded', initApp);
@@ -2124,10 +2358,11 @@ async function fetchThemes(anime){
     box.innerHTML='<div class="spinner"></div>';
     try{
         const full=await getJikanAnimeFull(anime.idMal);
+        if(!isCurrentDetail(anime))return;
         const theme=full?.theme||{};
         const rows=[...(theme.openings||[]).map(x=>['Opening',x]),...(theme.endings||[]).map(x=>['Ending',x])];
         box.innerHTML=rows.length?rows.map(([kind,title])=>`<div class="music-item"><div><strong>${kind}</strong><small>${escapeHtml(title)}</small></div><a class="see-more-btn" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${encodeURIComponent(`${title} ${displayTitle(anime)}`)}">Search</a></div>`).join(''):'<div class="empty-state">No opening or ending songs are listed for this title.</div>';
-    }catch(e){box.innerHTML='<div class="empty-state"><strong>Theme songs are temporarily unavailable.</strong></div>';}
+    }catch(e){if(!isCurrentDetail(anime))return;box.innerHTML='<div class="empty-state"><strong>Theme songs are temporarily unavailable.</strong></div>';}
 }
 let newsPage = 1;
 const NEWS_PAGE_SIZE = 15;
@@ -2355,8 +2590,10 @@ function initConnectedExperience(){
     document.getElementById('refresh-news-btn')?.addEventListener('click',()=>loadNews(true, newsPage));
     document.getElementById('news-prev-btn')?.addEventListener('click',()=>{ if(newsPage > 1) { scrollPageToTop(); loadNews(false, newsPage - 1); } });
     document.getElementById('news-next-btn')?.addEventListener('click',()=>{ scrollPageToTop(); loadNews(false, newsPage + 1); });
-    document.querySelectorAll('.nav-btn').forEach(btn=>btn.addEventListener('click',()=>{if(btn.dataset.tab==='view-news')loadNews();}));
     const baseRender=renderAnimeDetails;
     renderAnimeDetails=function(anime){ detailSectionState={animeId:null,loaded:new Set()}; baseRender(anime); renderEnhancedDetails(anime); };
 }
 document.addEventListener('DOMContentLoaded',initConnectedExperience);
+// Show the page named in the address. This runs after both setup functions above
+// so that an anime page opened from a shared link gets every section.
+document.addEventListener('DOMContentLoaded',()=>renderRoute());

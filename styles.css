@@ -2242,3 +2242,27 @@ html::-webkit-scrollbar, body::-webkit-scrollbar, *::-webkit-scrollbar {
 .news-card-image img { width:100%; height:100%; object-fit:cover; display:block; }
 .news-card-image span { display:none; color:var(--text-muted); font-size:12px; font-weight:800; letter-spacing:.04em; }
 .news-card-image.image-missing span { display:block; }
+
+/* ==========================================
+   LINKED CARDS & KEYBOARD FOCUS
+   Anime cards and studio names are real links (see createAnimeCard).
+   ========================================== */
+.anime-card-link {
+    position: absolute;
+    inset: 0;
+    display: block;
+    color: inherit;
+    text-decoration: none;
+    border-radius: inherit;
+}
+.anime-card-link:focus-visible {
+    outline: 3px solid var(--accent-red);
+    outline-offset: -3px;
+}
+.anime-card:focus-within .anime-card-overlay { opacity: 1; }
+.anime-card:focus-within .anime-card-title { transform: translateY(0); }
+.anime-card:focus-within .card-eraser-btn,
+.card-eraser-btn:focus-visible { opacity: 1; }
+a.studio-link { text-decoration: none; }
+a.studio-link:hover,
+a.studio-link:focus-visible { text-decoration: underline; color: var(--accent-cyan); }
