@@ -1342,6 +1342,9 @@ function setupHeroBillboard(animeList) {
     heroSlideIndex = 0;
     renderHeroIndicators();
     renderHeroSlide(0);
+    // Look up every slide's picture now, side by side (small requests; the images
+    // themselves are fetched one slide ahead).
+    heroSlides.slice(1).forEach(anime => findHeroHd(anime));
     startHeroAutoRotate();
 }
 function startHeroAutoRotate() {
@@ -1387,27 +1390,36 @@ const HERO_HD_MISS_TTL = 2 * 24 * 60 * 60 * 1000;
 const HERO_HD_RETRY_TTL = 5 * 60 * 1000;         // a source couldn't answer (down, or not set up yet): ask again in 5 minutes
 const HERO_HD_TIMEOUT_MS = 6000;
 const HERO_MAX_UPSCALE = 1.5;                      // more stretching than this looks soft
+const HERO_PREVIEW_UPSCALE = 2;                    // fine for a moment while the full-size picture loads
+const HERO_FIRST_PAINT_WAIT_MS = 400;              // longest the text waits for a picture
+const waitMs = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const heroHdInflight = new Map();
 let heroRenderToken = 0;
 function heroHdCache() {
     try { return JSON.parse(localStorage.getItem(HERO_HD_KEY) || '{}') || {}; } catch { return {}; }
 }
 function heroHdKey(anime) { return anime?.idMal ? `m${anime.idMal}` : anime?.id ? `a${anime.id}` : ''; }
-function tmdbImageUrl(path) {
+// TMDB pictures in the order to load them: the 1280px one (about 200 KB, quick) and,
+// when this screen needs more, the full-size one (often 4K, 1-3 MB) to sharpen it.
+function tmdbImageSteps(path) {
     const hero = document.getElementById('home-hero');
     // A 16:9 picture covering the banner must be this wide (the banner may be taller than 16:9 on phones).
     const width = hero?.clientWidth || innerWidth, height = hero?.clientHeight || innerHeight * 0.88;
     const needed = Math.max(width, height * 16 / 9) * Math.min(window.devicePixelRatio || 1, 2);
-    return `${TMDB_IMAGE_BASE}${needed > 1400 ? 'original' : 'w1280'}${path}`;
+    const steps = [`${TMDB_IMAGE_BASE}w1280${path}`];
+    if (needed > 1280 * 1.15) steps.push(`${TMDB_IMAGE_BASE}original${path}`);
+    return steps;
 }
-// Remembered HD sources for this anime: [] when there are none, undefined when unknown.
+// Remembered HD pictures for this anime, lowest to highest quality: [] when there are none,
+// undefined when not looked up yet.
 function cachedHeroHd(anime) {
     const record = heroHdCache()[heroHdKey(anime)];
     if (!record || Date.now() > record.expiresAt) return undefined;
     return heroSourceUrls(record);
 }
 function heroSourceUrls(record) {
-    return [record.tmdb ? tmdbImageUrl(record.tmdb) : '', record.kitsu || ''].filter(Boolean);
+    if (record.tmdb) return tmdbImageSteps(record.tmdb);
+    return record.kitsu ? [record.kitsu] : [];
 }
 function rememberHeroHd(anime, record, ttl) {
     const key = heroHdKey(anime);
@@ -1488,12 +1500,12 @@ function preloadImage(url) {
     });
 }
 // True when an image this size can cover the banner without visible stretching.
-function sharpEnoughForHero(size) {
+function sharpEnoughForHero(size, maxUpscale = HERO_MAX_UPSCALE) {
     if (!size?.width || !size?.height) return false;
     const hero = document.getElementById('home-hero');
     const width = hero?.clientWidth || innerWidth, height = hero?.clientHeight || innerHeight * 0.88;
     const scale = Math.max(width / size.width, height / size.height) * Math.min(window.devicePixelRatio || 1, 2);
-    return scale <= HERO_MAX_UPSCALE;
+    return scale <= maxUpscale;
 }
 function heroLayerParts(layer) {
     let backdrop = layer.querySelector('.hero-layer-bg');
@@ -1505,7 +1517,7 @@ function heroLayerParts(layer) {
 const cssUrl = (url) => url ? `url('${String(url).replace(/'/g, '%27')}')` : 'none';
 // Cross-fades the banner. mode 'full' = a sharp picture across the whole banner;
 // 'spotlight' = the poster, sharp, beside the text, over a dim blurred backdrop.
-function showHeroBackground({ mode, image, backdrop }) {
+function showHeroBackground({ mode, image, backdrop }, { sharpen = false } = {}) {
     const layers = [document.getElementById('hero-bg-a'), document.getElementById('hero-bg-b')];
     const nextLayerIndex = heroBackgroundLayer === 0 ? 1 : 0;
     const currentLayer = layers[heroBackgroundLayer];
@@ -1522,25 +1534,22 @@ function showHeroBackground({ mode, image, backdrop }) {
     nextLayer.dataset.mode = mode;
     document.getElementById('home-hero')?.classList.toggle('spotlight-mode', mode === 'spotlight');
     nextLayer.dataset.src = image || '';
+    // Swapping in a sharper copy of the same picture: fade only, no zoom.
+    nextLayer.classList.toggle('no-zoom', sharpen);
     nextLayer.classList.add('active');
     currentLayer?.classList.remove('active');
     heroBackgroundLayer = nextLayerIndex;
 }
-// Picks how to show this anime's banner from what's loaded so far.
-async function heroPicture(anime, hdUrls = []) {
-    for (const url of [...hdUrls, anime.bannerImage].filter(Boolean)) {
-        const size = await preloadImage(url);
-        if (sharpEnoughForHero(size)) return { mode: 'full', image: url };
-    }
+function spotlightPicture(anime) {
     const poster = imageUrl(anime);
-    await Promise.all([preloadImage(poster), anime.bannerImage ? preloadImage(anime.bannerImage) : null]);
     return { mode: 'spotlight', image: poster, backdrop: anime.bannerImage || poster };
 }
 function renderHeroSlide(index) {
     const anime = heroSlides[index];
     if (!anime) return;
     const token = ++heroRenderToken;
-    const knownHd = cachedHeroHd(anime);
+    const steps = cachedHeroHd(anime) || [];
+    if (!steps.length) findHeroHd(anime);   // start the lookup now, ahead of anything else
 
     const applySlide = (picture) => {
         if (token !== heroRenderToken) return;
@@ -1556,20 +1565,51 @@ function renderHeroSlide(index) {
         heroWatchButton.onclick = () => window.open(buildWatchUrl(selectedWatchSite.url, watchTitle), '_blank', 'noopener,noreferrer');
         document.getElementById('hero-info-btn').onclick = () => viewSingleAnime(anime.id);
         document.querySelectorAll('#hero-indicators .hero-dot').forEach((dot, i) => dot.classList.toggle('active', i === index));
-        if (knownHd === undefined) upgradeHeroSlide(anime, token, picture);
-        // Get the next banner ready so it's sharp from the start.
-        const next = heroSlides[(index + 1) % heroSlides.length];
-        if (next && next !== anime) findHeroHd(next).then(urls => heroPicture(next, urls));
+        sharpenHeroSlide(anime, token, picture).then(() => {
+            // Then get the next slide's pictures ready, so it's sharp the moment it appears.
+            const next = heroSlides[(index + 1) % heroSlides.length];
+            if (next && next !== anime && token === heroRenderToken) prefetchHeroSlide(next);
+        });
     };
-    // Already know the HD picture (or that there isn't one): show the final look straight away.
-    heroPicture(anime, knownHd || []).then(applySlide);
+
+    // Show the text straight away with the best picture that's ready within a moment:
+    // the sharpest copy already downloaded, else the quick 1280px one, else the poster.
+    // (A lower-quality copy may stretch a little more, since a sharper one is on its way.)
+    const allowed = (i) => i === steps.length - 1 ? HERO_MAX_UPSCALE : HERO_PREVIEW_UPSCALE;
+    const ready = [...steps].reverse().find(url => sharpEnoughForHero(loadedImageSizes.get(url), allowed(steps.indexOf(url))));
+    if (ready) { applySlide({ mode: 'full', image: ready }); return; }
+    const quick = steps[0];
+    const poster = imageUrl(anime);
+    Promise.race([
+        Promise.all([quick ? preloadImage(quick) : null, preloadImage(poster)]),
+        waitMs(HERO_FIRST_PAINT_WAIT_MS),
+    ]).then(() => {
+        const quickSize = quick && loadedImageSizes.get(quick);
+        applySlide(sharpEnoughForHero(quickSize, allowed(0)) ? { mode: 'full', image: quick } : spotlightPicture(anime));
+    });
 }
-async function upgradeHeroSlide(anime, token, shown) {
-    const urls = await findHeroHd(anime);
-    if (!urls.length || token !== heroRenderToken) return;
-    const picture = await heroPicture(anime, urls);
-    if (token !== heroRenderToken || picture.mode !== 'full' || picture.image === shown.image) return;
-    showHeroBackground(picture);
+// Loads the HD pictures for the slide on screen, lowest quality first, and swaps each in
+// once it has loaded. The full-size one is only kept if it's sharp for this screen.
+async function sharpenHeroSlide(anime, token, shown) {
+    const steps = await findHeroHd(anime);
+    let current = shown.mode === 'full' ? steps.indexOf(shown.image) : -1;
+    for (let i = current + 1; i < steps.length; i++) {
+        const size = await preloadImage(steps[i]);
+        if (token !== heroRenderToken) return;
+        const last = i === steps.length - 1;
+        if (!sharpEnoughForHero(size, last ? HERO_MAX_UPSCALE : HERO_PREVIEW_UPSCALE)) continue;
+        showHeroBackground({ mode: 'full', image: steps[i] }, { sharpen: current >= 0 });
+        current = i;
+    }
+}
+const heroPrefetched = new Set();
+async function prefetchHeroSlide(anime) {
+    const steps = await findHeroHd(anime);
+    for (const url of steps) {
+        if (heroPrefetched.has(url)) continue;
+        heroPrefetched.add(url);
+        await preloadImage(url);
+    }
 }
 
 function initDiscoverFilters() {

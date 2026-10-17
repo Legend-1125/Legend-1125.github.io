@@ -1697,6 +1697,7 @@ body {
     will-change:opacity, transform;
 }
 .hero-bg-layer.active { opacity:1; transform:scale(1); }
+.hero-bg-layer.no-zoom { transform:none; }
 .hero-layer-bg { position:absolute; inset:0; background-size:cover; background-position:center 25%; }
 /* No picture big enough to fill the banner sharply: show the poster itself, crisp,
    beside the text, over a dimmed and blurred copy of the artwork. */
