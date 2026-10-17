@@ -818,6 +818,7 @@ const VIEW_ROUTES = Object.freeze({
     'view-home': '#/',
     'view-history': '#/list',
     'view-schedule': '#/schedule',
+    'view-seasonal': '#/seasonal',
     'view-news': '#/news',
 });
 const BROWSE_TARGETS = new Set(['trending', 'top', 'discover']);
@@ -866,6 +867,7 @@ function parseRoute(hash = location.hash) {
     if (section === 'list' && segments.length === 1) return { name: 'list', tab: params.get('tab') || '', params: Object.fromEntries(params) };
     if (section === 'news' && segments.length === 1) return { name: 'news', source: params.get('source') || 'all', page };
     if (section === 'schedule' && segments.length === 1) return { name: section };
+    if (section === 'seasonal' && segments.length === 1) return { name: 'seasonal', params: Object.fromEntries(params) };
     // MyAnimeList sync (mal.js): login return and "open this MAL entry in AniZone".
     if (section === 'mal-callback') return { name: 'mal-callback', code: params.get('code') || '', state: params.get('state') || '', error: params.get('error') || '' };
     if (section === 'mal' && numericId) return { name: 'mal-anime', id: numericId };
@@ -991,6 +993,12 @@ function renderRoute({ fresh = false } = {}) {
             setPageTitle('Schedule');
             showView('view-schedule');
             initScheduleView();
+            break;
+        case 'seasonal':
+            setPageTitle('Seasonal Chart');
+            showView('view-seasonal');
+            renderSeasonal(route.params);
+            restorePendingScroll();
             break;
         case 'news':
             pendingScrollRestore = null;
@@ -1127,6 +1135,7 @@ function initPreferences() {
         if (currentActiveRowTarget && !document.getElementById('view-results')?.classList.contains('hidden')) fetchExpandedGridData();
         if (!document.getElementById('view-schedule')?.classList.contains('hidden') && scheduleInitialized) initScheduleView(true);
         window.MalSync?.refreshViews();
+        scheduleForYouRows();
     });
     languageSelect?.addEventListener('change', event => {
         titleLanguage = event.target.value;
@@ -1337,6 +1346,358 @@ function createAnimeCard(anime, isHistory = false) {
         card.appendChild(button);
     }
     return card;
+}
+
+/* ==========================================
+   FOR YOU (home): recommendations from your MyAnimeList list
+   Shows you scored 8+ (or, with few scores, your recent completed and watching
+   shows) are looked up on AniList, whose users vote on "if you liked this, watch
+   that". Everything already on your list is skipped. One AniList request,
+   kept for 12 hours for the same set of shows.
+   ========================================== */
+const FOR_YOU_SEEDS = 8;
+const FOR_YOU_BECAUSE_ROWS = 2;
+const FOR_YOU_TTL = 12 * 60 * 60 * 1000;
+const FOR_YOU_CARD_FIELDS = 'id idMal isAdult status format episodes seasonYear averageScore popularity title { romaji english native } coverImage { large extraLarge }';
+let forYouToken = 0;
+let forYouTimer = null;
+
+function forYouSeeds(entries) {
+    const visible = entries.filter(entry => adultContentEnabled || entry.nsfw !== 'black');
+    const byScoreThenRecent = (a, b) => (b.score - a.score) || String(b.updatedAt).localeCompare(String(a.updatedAt));
+    let seeds = visible.filter(entry => entry.score >= 8 && entry.status !== 'plan_to_watch').sort(byScoreThenRecent);
+    if (seeds.length < 3) {
+        const extra = visible.filter(entry => ['completed', 'watching'].includes(entry.status) && !seeds.includes(entry) && (!entry.score || entry.score >= 6))
+            .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+        seeds = seeds.concat(extra);
+    }
+    return seeds.slice(0, FOR_YOU_SEEDS);
+}
+function forYouRowHtml(id, heading) {
+    return `<div class="content-row for-you-row"><div class="row-header"><h2>${escapeHtml(heading)}</h2></div><div class="slider-container"><button class="slider-arrow left-arrow" type="button" aria-label="Scroll left">‹</button><div class="slider-track" id="${id}"></div><button class="slider-arrow right-arrow" type="button" aria-label="Scroll right">›</button></div></div>`;
+}
+function wireSliderArrows(root) {
+    root.querySelectorAll('.slider-container').forEach(container => {
+        const track = container.querySelector('.slider-track');
+        container.querySelector('.left-arrow')?.addEventListener('click', () => track?.scrollBy({ left: -500, behavior: 'smooth' }));
+        container.querySelector('.right-arrow')?.addEventListener('click', () => track?.scrollBy({ left: 500, behavior: 'smooth' }));
+    });
+}
+function scheduleForYouRows() {
+    clearTimeout(forYouTimer);
+    forYouTimer = setTimeout(loadForYouRows, 300);
+}
+async function loadForYouRows() {
+    const host = document.getElementById('for-you-rows');
+    if (!host) return;
+    const token = ++forYouToken;
+    const entries = malSyncHas('listEntries') ? MalSync.listEntries() : [];
+    const seeds = forYouSeeds(entries);
+    if (!seeds.length) { host.innerHTML = ''; host.dataset.key = ''; return; }
+    const listed = new Set(entries.map(entry => entry.id));
+    const seedKey = seeds.map(seed => seed.id).sort((a, b) => a - b).join(',');
+    if (!host.dataset.key) host.innerHTML = forYouRowHtml('row-for-you', 'Recommended for you').replace('<div class="slider-track" id="row-for-you"></div>', '<div class="slider-track" id="row-for-you"><div class="spinner"></div></div>');
+
+    const query = `query {\n${seeds.map((seed, i) => `  s${i}: Media(idMal: ${Number(seed.id)}, type: ANIME) { id idMal title { romaji english native } recommendations(sort: RATING_DESC, perPage: 10) { nodes { rating mediaRecommendation { ${FOR_YOU_CARD_FIELDS} } } } }`).join('\n')}\n}`;
+    let data;
+    try {
+        data = await aniRequest(query, {}, { cacheKey: `foryou:v1:${seedKey}`, ttl: FOR_YOU_TTL, priority: 'background' });
+    } catch (error) {
+        if (token !== forYouToken) return;
+        if (!host.dataset.key) host.innerHTML = '';   // quietly leave the section out
+        console.warn('Recommendations unavailable:', error.message);
+        return;
+    }
+    if (token !== forYouToken) return;
+
+    // Score each suggestion: how much you liked the show it came from, and how many
+    // AniList users agree it's a good follow-up.
+    const pool = new Map();
+    const perSeed = [];
+    seeds.forEach((seed, i) => {
+        const media = data?.[`s${i}`];
+        if (!media) return;
+        const liked = (seed.score || 7) - 5;
+        const recs = [];
+        for (const node of media.recommendations?.nodes || []) {
+            const rec = node?.mediaRecommendation;
+            if (!rec?.id || (rec.idMal && listed.has(rec.idMal)) || rec.status === 'NOT_YET_RELEASED') continue;
+            if (rec.isAdult && !adultContentEnabled) continue;
+            const weight = liked * (1 + Math.log1p(Math.max(0, node.rating || 0)));
+            const item = pool.get(rec.id) || { anime: rec, weight: 0 };
+            item.weight += weight;
+            pool.set(rec.id, item);
+            recs.push(rec);
+        }
+        perSeed.push({ seed, media, recs });
+    });
+    const top = [...pool.values()].sort((a, b) => b.weight - a.weight).slice(0, 20).map(item => item.anime);
+    const because = perSeed.filter(row => row.recs.length >= 4)
+        .sort((a, b) => String(b.seed.updatedAt).localeCompare(String(a.seed.updatedAt)))
+        .slice(0, FOR_YOU_BECAUSE_ROWS);
+
+    if (!top.length) { host.innerHTML = ''; host.dataset.key = ''; return; }
+    host.innerHTML = forYouRowHtml('row-for-you', 'Recommended for you')
+        + because.map((row, i) => forYouRowHtml(`row-because-${i}`, `Because you watched ${displayTitle(row.media)}`)).join('');
+    host.dataset.key = seedKey;
+    wireSliderArrows(host);
+    renderSliderTrack('row-for-you', top);
+    because.forEach((row, i) => renderSliderTrack(`row-because-${i}`, row.recs.slice(0, 15)));
+}
+
+/* ==========================================
+   SEASONAL CHART  (#/seasonal?season=fall&year=2026&format=TV&genre=Action&sort=score)
+   Every anime starting in a season, like MyAnimeList's seasonal page, with
+   format and genre filters and one-click "Plan to Watch".
+   ========================================== */
+// mal.js and app.js load separately, so a browser can briefly hold an older copy of
+// one of them right after an update: check a feature exists before using it.
+const malSyncHas = (name) => typeof MalSync !== 'undefined' && typeof MalSync[name] === 'function';
+const SEASON_ORDER = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
+const SEASON_NAMES = { WINTER: 'Winter', SPRING: 'Spring', SUMMER: 'Summer', FALL: 'Fall' };
+const SEASONAL_FORMATS = Object.freeze({ TV: 'TV', TV_SHORT: 'TV Short', MOVIE: 'Movie', ONA: 'ONA', OVA: 'OVA', SPECIAL: 'Special' });
+const SEASONAL_SORTS = Object.freeze({ popularity: ['Most popular', 'POPULARITY_DESC'], score: ['Highest score', 'SCORE_DESC'], trending: ['Trending', 'TRENDING_DESC'], start: ['Start date', 'START_DATE'], title: ['Title', 'TITLE_ROMAJI'] });
+const SEASONAL_PAGE_SIZE = 50;
+const MAL_MEDIA_TYPE = { TV: 'tv', TV_SHORT: 'tv', MOVIE: 'movie', OVA: 'ova', ONA: 'ona', SPECIAL: 'special', MUSIC: 'music' };
+const MAL_AIRING = { RELEASING: 'currently_airing', FINISHED: 'finished_airing', NOT_YET_RELEASED: 'not_yet_aired' };
+let seasonalView = null;
+let seasonalItems = [];
+let seasonalToken = 0;
+let seasonalHasMore = false;
+let seasonalTotal = 0;
+let seasonalControlsReady = false;
+
+function seasonOf(date = new Date()) {
+    return { season: SEASON_ORDER[Math.floor(date.getMonth() / 3)], year: date.getFullYear() };
+}
+function shiftSeason({ season, year }, by) {
+    const index = SEASON_ORDER.indexOf(season) + by;
+    return { season: SEASON_ORDER[((index % 4) + 4) % 4], year: year + Math.floor(index / 4) };
+}
+const chartSeasonLabel = ({ season, year }) => `${SEASON_NAMES[season]} ${year}`;
+function readSeasonalView(params = {}) {
+    const now = seasonOf();
+    const season = String(params.season || '').toUpperCase();
+    const year = Number(params.year);
+    return {
+        season: SEASON_ORDER.includes(season) ? season : now.season,
+        year: Number.isInteger(year) && year >= 1940 && year <= now.year + 3 ? year : now.year,
+        format: SEASONAL_FORMATS[params.format] ? params.format : '',
+        genre: ANILIST_GENRES.has(params.genre) ? params.genre : '',
+        sort: SEASONAL_SORTS[params.sort] ? params.sort : 'popularity',
+        hideListed: params.hide === 'listed',
+    };
+}
+function seasonalHash(view = seasonalView) {
+    const now = seasonOf();
+    const isNow = view.season === now.season && view.year === now.year;
+    return routeHash('/seasonal', {
+        season: isNow ? '' : view.season.toLowerCase(), year: isNow ? '' : view.year,
+        format: view.format, genre: view.genre, sort: view.sort === 'popularity' ? '' : view.sort, hide: view.hideListed ? 'listed' : '',
+    });
+}
+function setSeasonalView(changes) {
+    navigate(seasonalHash({ ...seasonalView, ...changes }));
+}
+
+function initSeasonalControls() {
+    if (seasonalControlsReady) return;
+    seasonalControlsReady = true;
+    const format = document.getElementById('seasonal-format');
+    const genre = document.getElementById('seasonal-genre');
+    const sort = document.getElementById('seasonal-sort');
+    if (format) format.innerHTML = '<option value="">All formats</option>' + Object.entries(SEASONAL_FORMATS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+    if (genre) genre.innerHTML = '<option value="">All genres</option>' + [...ANILIST_GENRES].filter(g => g !== 'Hentai').map(g => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join('');
+    if (sort) sort.innerHTML = Object.entries(SEASONAL_SORTS).map(([value, [label]]) => `<option value="${value}">${label}</option>`).join('');
+    [format, genre, sort].forEach(select => select && enhanceSelect(select));
+    format?.addEventListener('change', () => { if (format.value !== seasonalView.format) setSeasonalView({ format: format.value }); });
+    genre?.addEventListener('change', () => { if (genre.value !== seasonalView.genre) setSeasonalView({ genre: genre.value }); });
+    sort?.addEventListener('change', () => { if (sort.value !== seasonalView.sort) setSeasonalView({ sort: sort.value }); });
+    document.getElementById('seasonal-hide-listed')?.addEventListener('click', () => setSeasonalView({ hideListed: !seasonalView.hideListed }));
+    document.getElementById('season-more-btn')?.addEventListener('click', () => loadSeasonalPage(Math.floor(seasonalItems.length / SEASONAL_PAGE_SIZE) + 1));
+    if (malSyncHas('subscribe')) MalSync.subscribe(() => { if (!document.getElementById('view-seasonal')?.classList.contains('hidden')) drawSeasonal(); });
+}
+
+function renderSeasonSwitch() {
+    const bar = document.getElementById('season-switch');
+    if (!bar) return;
+    const now = seasonOf();
+    const picks = [[shiftSeason(now, -1), 'Last season'], [now, 'This season'], [shiftSeason(now, 1), 'Next season']];
+    const same = (a, b) => a.season === b.season && a.year === b.year;
+    const link = (target, note) => {
+        const active = same(target, seasonalView);
+        return `<a class="mylist-tab season-tab${active ? ' active' : ''}" href="${seasonalHash({ ...seasonalView, ...target })}"${active ? ' aria-current="page"' : ''}>${escapeHtml(chartSeasonLabel(target))}${note ? ` <span>${note}</span>` : ''}</a>`;
+    };
+    const elsewhere = !picks.some(([target]) => same(target, seasonalView));
+    bar.innerHTML = `<a class="season-step" href="${seasonalHash({ ...seasonalView, ...shiftSeason(seasonalView, -1) })}" aria-label="Previous season" title="Previous season">‹</a>`
+        + picks.map(([target, note]) => link(target, note)).join('')
+        + (elsewhere ? link(seasonalView, '') : '')
+        + `<a class="season-step" href="${seasonalHash({ ...seasonalView, ...shiftSeason(seasonalView, 1) })}" aria-label="Next season" title="Next season">›</a>`;
+    // On phones the tabs scroll sideways: bring the chosen season into view.
+    const active = bar.querySelector('.season-tab.active');
+    if (active && bar.scrollWidth > bar.clientWidth) bar.scrollLeft = Math.max(0, active.offsetLeft - bar.offsetLeft - (bar.clientWidth - active.offsetWidth) / 2);
+}
+
+function renderSeasonal(params = {}) {
+    initSeasonalControls();
+    const next = readSeasonalView(params);
+    const sameQuery = seasonalView && ['season', 'year', 'format', 'genre', 'sort'].every(key => seasonalView[key] === next[key]);
+    seasonalView = next;
+    const set = (id, value) => { const select = document.getElementById(id); if (select) { select.value = value; select._azRebuild?.(); } };
+    set('seasonal-format', next.format); set('seasonal-genre', next.genre); set('seasonal-sort', next.sort);
+    const hide = document.getElementById('seasonal-hide-listed');
+    if (hide) {
+        const available = typeof MalSync !== 'undefined' && MalSync.isLoggedIn();
+        hide.classList.toggle('hidden', !available);
+        hide.setAttribute('aria-pressed', String(next.hideListed));
+    }
+    const subtitle = document.getElementById('seasonal-subtitle');
+    if (subtitle) subtitle.textContent = `Anime starting in ${chartSeasonLabel(next)}`;
+    renderSeasonSwitch();
+    if (sameQuery && seasonalItems.length) { drawSeasonal(); return; }
+    seasonalItems = [];
+    loadSeasonalPage(1);
+}
+
+async function loadSeasonalPage(page) {
+    const grid = document.getElementById('season-grid');
+    const more = document.getElementById('season-more-btn');
+    if (!grid) return;
+    const token = ++seasonalToken;
+    const view = seasonalView;
+    if (page === 1) { grid.innerHTML = '<div class="spinner"></div>'; setSeasonalStatus(''); }
+    if (more) { more.disabled = true; more.textContent = 'Loading…'; }
+    const query = `query ($page: Int, $perPage: Int, $season: MediaSeason, $year: Int, $formats: [MediaFormat], $genre: String, $sort: [MediaSort], $isAdult: Boolean) {
+        Page(page: $page, perPage: $perPage) {
+            pageInfo { total hasNextPage }
+            media(type: ANIME, season: $season, seasonYear: $year, format_in: $formats, genre: $genre, sort: $sort, isAdult: $isAdult) {
+                id idMal isAdult format episodes duration status source genres averageScore popularity
+                title { romaji english native } coverImage { large extraLarge color }
+                startDate { year month day } description(asHtml: false)
+                studios(isMain: true) { nodes { name } }
+                nextAiringEpisode { episode airingAt }
+            }
+        }
+    }`;
+    const variables = {
+        page, perPage: SEASONAL_PAGE_SIZE, season: view.season, year: view.year,
+        formats: view.format ? [view.format] : Object.keys(SEASONAL_FORMATS), genre: view.genre || null,
+        sort: view.sort === 'popularity' ? ['POPULARITY_DESC'] : [SEASONAL_SORTS[view.sort][1], 'POPULARITY_DESC'], isAdult: adultContentEnabled ? null : false,
+    };
+    try {
+        const data = await aniRequest(query, variables, {
+            cacheKey: `seasonal:v1:${view.season}:${view.year}:${view.format}:${view.genre}:${view.sort}:${adultContentEnabled}:${page}`,
+            ttl: 30 * 60 * 1000, priority: 'interactive',
+        });
+        if (token !== seasonalToken) return;
+        const media = data?.Page?.media || [];
+        const known = new Set(seasonalItems.map(item => item.id));
+        seasonalItems = seasonalItems.concat(media.filter(item => !known.has(item.id)));
+        seasonalHasMore = Boolean(data?.Page?.pageInfo?.hasNextPage);
+        seasonalTotal = data?.Page?.pageInfo?.total || seasonalItems.length;
+        drawSeasonal();
+    } catch (error) {
+        if (token !== seasonalToken) return;
+        if (page === 1) {
+            grid.innerHTML = `<div class="empty-state api-error">${escapeHtml(error.message || 'This season could not be loaded.')}<button class="inline-retry-btn" type="button">Retry</button></div>`;
+            grid.querySelector('.inline-retry-btn')?.addEventListener('click', () => loadSeasonalPage(1));
+        } else {
+            setSeasonalStatus('More anime could not be loaded just now.');
+        }
+    } finally {
+        if (token === seasonalToken && more) { more.disabled = false; more.textContent = 'Show more'; }
+    }
+}
+function setSeasonalStatus(text) {
+    const status = document.getElementById('seasonal-status');
+    if (!status) return;
+    status.textContent = text;
+    status.classList.toggle('hidden', !text);
+}
+
+function seasonalAiringText(anime) {
+    const next = anime.nextAiringEpisode;
+    if (next?.airingAt) {
+        const when = new Date(next.airingAt * 1000);
+        const day = when.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+        const time = when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        return `Ep ${next.episode} airs ${day}, ${time}`;
+    }
+    const start = anime.startDate || {};
+    if (anime.status === 'NOT_YET_RELEASED') {
+        if (start.year && start.month && start.day) return `Starts ${new Date(start.year, start.month - 1, start.day).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}`;
+        if (start.year && start.month) return `Starts ${new Date(start.year, start.month - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' })}`;
+        return 'Start date not announced';
+    }
+    if (anime.status === 'FINISHED') return 'Finished airing';
+    return 'Airing';
+}
+const SOURCE_NAMES = { MANGA: 'Manga', LIGHT_NOVEL: 'Light novel', ORIGINAL: 'Original', VIDEO_GAME: 'Game', VISUAL_NOVEL: 'Visual novel', NOVEL: 'Novel', WEB_NOVEL: 'Web novel', WEB_MANGA: 'Web manga', OTHER: '' };
+function compactCount(n) {
+    if (!n) return '';
+    if (n >= 1e6) return `${(n / 1e6).toFixed(1).replace(/\.0$/, '')}M`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '')}K`;
+    return String(n);
+}
+function seasonalActionHtml(anime) {
+    if (!anime.idMal) return '';
+    if (!malSyncHas('entryFor') || !malSyncHas('addToPlanToWatch')) return '';
+    const entry = MalSync.entryFor(anime.idMal);
+    if (entry?.status) {
+        const progress = entry.status === 'watching' && entry.watched ? ` · Ep ${entry.watched}` : '';
+        return `<span class="season-on-list mal-status-${escapeHtml(entry.status)}"><i aria-hidden="true"></i>${escapeHtml(MalSync.statusLabel(entry.status))}${progress}</span>`;
+    }
+    return `<button type="button" class="season-ptw-btn" data-ptw="${anime.id}">+ Plan to Watch</button>`;
+}
+function seasonalCardHtml(anime) {
+    const title = displayTitle(anime);
+    const alt = secondaryTitle(anime);
+    const studio = anime.studios?.nodes?.[0]?.name || '';
+    const facts = [studio, anime.episodes ? `${anime.episodes} ep${anime.episodes === 1 ? '' : 's'}` : '', anime.duration && anime.format === 'MOVIE' ? `${anime.duration} min` : '', SOURCE_NAMES[anime.source] || ''].filter(Boolean).join(' · ');
+    const synopsis = stripHtml(anime.description) || 'No synopsis yet.';
+    const popularity = compactCount(anime.popularity);
+    return `<article class="season-card${anime.isAdult ? ' adult-card' : ''}" data-anime-id="${anime.id}">
+        <a class="season-card-poster" href="${animeHash(anime.id)}" tabindex="-1" aria-hidden="true"><img src="${escapeHtml(imageUrl(anime))}" alt="" loading="lazy" decoding="async"><span class="season-card-format">${escapeHtml(SEASONAL_FORMATS[anime.format] || formatFormat(anime.format))}</span></a>
+        <div class="season-card-body">
+            <a class="season-card-title" href="${animeHash(anime.id)}" title="${escapeHtml(alt ? `${title} (${alt})` : title)}">${escapeHtml(title)}</a>
+            ${facts ? `<div class="season-card-meta">${escapeHtml(facts)}</div>` : ''}
+            <div class="season-card-airing">${escapeHtml(seasonalAiringText(anime))}</div>
+            ${anime.genres?.length ? `<div class="season-card-genres">${anime.genres.slice(0, 4).map(g => `<span>${escapeHtml(g)}</span>`).join('')}</div>` : ''}
+            <p class="season-card-synopsis">${escapeHtml(synopsis)}</p>
+            <div class="season-card-foot">
+                <span class="season-card-stats">${anime.averageScore ? `<b>★ ${anime.averageScore}</b>` : '<b class="muted">No score yet</b>'}${popularity ? `<span title="${escapeHtml(`${anime.popularity.toLocaleString()} AniList users have it on their list`)}">${popularity} members</span>` : ''}</span>
+                <span class="season-card-action" data-action-for="${anime.id}">${seasonalActionHtml(anime)}</span>
+            </div>
+        </div>
+    </article>`;
+}
+function drawSeasonal() {
+    const grid = document.getElementById('season-grid');
+    const more = document.getElementById('season-more-btn');
+    const count = document.getElementById('seasonal-count');
+    if (!grid || !seasonalView) return;
+    const loggedIn = typeof MalSync !== 'undefined' && MalSync.isLoggedIn();
+    const visible = seasonalItems.filter(anime => (adultContentEnabled || !anime.isAdult)
+        && !(seasonalView.hideListed && loggedIn && anime.idMal && malSyncHas('entryFor') && MalSync.entryFor(anime.idMal)));
+    if (count) count.textContent = seasonalItems.length ? `${seasonalTotal} anime${visible.length !== seasonalItems.length ? ` · ${seasonalItems.length - visible.length} on your list hidden` : ''}` : '';
+    more?.classList.toggle('hidden', !seasonalHasMore);
+    if (!visible.length) {
+        grid.innerHTML = seasonalItems.length
+            ? '<div class="empty-state">Everything shown so far is already on your list.</div>'
+            : `<div class="empty-state">No anime found for ${escapeHtml(chartSeasonLabel(seasonalView))}${seasonalView.format || seasonalView.genre ? ' with these filters' : ''}.</div>`;
+        return;
+    }
+    grid.innerHTML = visible.map(seasonalCardHtml).join('');
+    grid.querySelectorAll('[data-ptw]').forEach(button => button.addEventListener('click', () => {
+        const anime = seasonalItems.find(item => item.id === Number(button.dataset.ptw));
+        if (!anime?.idMal) return;
+        MalSync.addToPlanToWatch({
+            id: anime.idMal, title: anime.title?.romaji || anime.title?.english || '', titleEn: anime.title?.english || '',
+            picture: anime.coverImage?.large || imageUrl(anime), episodes: anime.episodes || 0, isAdult: anime.isAdult,
+            mediaType: MAL_MEDIA_TYPE[anime.format] || '', airing: MAL_AIRING[anime.status] || '', genres: anime.genres || [],
+            season: { year: seasonalView.year, season: seasonalView.season.toLowerCase() }, mean: 0,
+        });
+    }));
 }
 
 function setupHeroBillboard(animeList) {
@@ -2477,6 +2838,8 @@ function initApp() {
     // Home rows load in the background on every page; the full-screen loader is
     // only shown when Home is the page being opened.
     loadDashboardRows({ silent: parseRoute().name !== 'home' });
+    // Recommendations follow your MyAnimeList list (logging in, list updates, changes).
+    if (malSyncHas('subscribe')) { MalSync.subscribe(scheduleForYouRows); scheduleForYouRows(); }
 }
 
 document.addEventListener('DOMContentLoaded', initApp);

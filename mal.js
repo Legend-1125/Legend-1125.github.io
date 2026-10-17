@@ -22,7 +22,7 @@ const MalSync = (() => {
     const LOGIN_KEY = 'anizone:mal:login:v1';           // sessionStorage, survives the trip to MAL and back
     const LIST_FRESH_MS = 2 * 60 * 1000;
     const SAVE_DELAY_MS = 700;                           // group quick +/- clicks into one save
-    const LIST_FIELDS = 'list_status,num_episodes,nsfw,media_type,status,alternative_titles,genres,start_season,mean';
+    const LIST_FIELDS = 'list_status,num_episodes,nsfw,media_type,status,alternative_titles,genres,start_season,mean,average_episode_duration';
 
     const STATUSES = Object.freeze([
         ['watching', 'Watching'],
@@ -228,7 +228,7 @@ const MalSync = (() => {
         [AUTH_KEY, PROFILE_KEY, LIST_KEY].forEach(key => remove(key));
         listCache = null;
         renderSettings();
-        refreshViews();
+        emit();   // the list view, progress panel and recommendations all update
         if (!quiet) toast('Logged out of MyAnimeList on this device.');
     }
 
@@ -256,6 +256,7 @@ const MalSync = (() => {
             genres: (node.genres || []).map(genre => genre.name).filter(Boolean),
             season: node.start_season?.year ? { year: Number(node.start_season.year), season: node.start_season.season || '' } : null,
             mean: Number(node.mean) || 0,
+            duration: Number(node.average_episode_duration) || 0,   // seconds per episode
             ...statusFields(listStatus),
         };
     }
@@ -666,7 +667,7 @@ const MalSync = (() => {
 
     function renderMyList(tab = '', params = {}) {
         const loggedIn = isConfigured() && isLoggedIn();
-        const validTabs = ['all', 'history', ...STATUSES.map(([value]) => value)];
+        const validTabs = ['all', 'history', 'stats', ...STATUSES.map(([value]) => value)];
         currentTab = validTabs.includes(tab) ? tab : (loggedIn ? 'watching' : 'history');
         listView = readListView(params);
         if (loggedIn) refreshList().catch(error => showNotice(error.message, 'error')); // starts first so the list shows a spinner, not "empty"
@@ -726,10 +727,14 @@ const MalSync = (() => {
         const entries = Object.values(loadList().entries).filter(entry => !hiddenAsAdult(entry));
         const historyCount = (typeof clickHistory !== 'undefined' ? clickHistory : []).filter(item => adultContentEnabled || !item.isAdult).length;
         const tabLink = (value, label, count) => `<a class="mylist-tab${currentTab === value ? ' active' : ''}" href="${value === 'history' ? '#/list?tab=history' : listHash(value)}"${currentTab === value ? ' aria-current="page"' : ''}>${label}${count != null ? ` <span>${count}</span>` : ''}</a>`;
-        tabs.innerHTML = (loggedIn ? tabLink('all', 'All', entries.length) + STATUSES.map(([value, label]) => tabLink(value, label, entries.filter(entry => entry.status === value).length)).join('') : '') + tabLink('history', 'History', historyCount);
+        const statsLink = `<a class="mylist-tab${currentTab === 'stats' ? ' active' : ''}" href="#/list?tab=stats"${currentTab === 'stats' ? ' aria-current="page"' : ''}>Stats</a>`;
+        tabs.innerHTML = (loggedIn ? tabLink('all', 'All', entries.length) + STATUSES.map(([value, label]) => tabLink(value, label, entries.filter(entry => entry.status === value).length)).join('') + statsLink : '') + tabLink('history', 'History', historyCount);
         renderActions(loggedIn);
 
-        const showList = loggedIn && currentTab !== 'history';
+        const statsPanel = $('mylist-stats');
+        const showStats = loggedIn && currentTab === 'stats';
+        statsPanel?.classList.toggle('hidden', !showStats);
+        const showList = loggedIn && currentTab !== 'history' && !showStats;
         toolbar?.classList.toggle('hidden', !showList);
         if (!showList) { filterPanel?.classList.add('hidden'); $('mylist-filter-toggle')?.setAttribute('aria-expanded', 'false'); }
         countLine?.classList.toggle('hidden', !showList);
@@ -742,6 +747,13 @@ const MalSync = (() => {
             return;
         }
         historyPanel.classList.add('hidden');
+        if (showStats) {
+            grid.classList.add('hidden');
+            if (!loadList().fetchedAt && listRequest) { statsPanel.innerHTML = '<div class="spinner"></div>'; showNotice(''); return; }
+            showNotice('');
+            renderStats(statsPanel, entries);
+            return;
+        }
         grid.classList.remove('hidden');
         syncToolbar();
         if (!loadList().fetchedAt && listRequest) { grid.innerHTML = '<div class="spinner"></div>'; showNotice(''); if (countLine) countLine.textContent = ''; return; }
@@ -760,6 +772,125 @@ const MalSync = (() => {
         const rows = layout === 'list';
         grid.classList.toggle('mal-rows', rows);
         items.forEach(entry => grid.appendChild(rows ? listRow(entry) : listCard(entry)));
+    }
+
+    /* ---------- Stats tab ---------- */
+    // Everything is worked out from your MyAnimeList list on this device.
+    const DEFAULT_MINUTES = { movie: 100, music: 4 };   // when MAL has no episode length
+    function episodesSeen(entry) {
+        return entry.status === 'completed' ? Math.max(entry.watched, entry.episodes || 0) : entry.watched;
+    }
+    function minutesWatched(entry) {
+        const perEpisode = entry.duration ? entry.duration / 60 : (DEFAULT_MINUTES[entry.mediaType] || 24);
+        return episodesSeen(entry) * perEpisode;
+    }
+    function computeStats(entries) {
+        const byStatus = Object.fromEntries(STATUSES.map(([value]) => [value, 0]));
+        const scores = Array(11).fill(0);
+        const genres = new Map();
+        const types = new Map();
+        let episodes = 0, minutes = 0, scoreSum = 0, scored = 0, diffSum = 0, diffCount = 0;
+        for (const entry of entries) {
+            if (entry.status in byStatus) byStatus[entry.status]++;
+            episodes += episodesSeen(entry);
+            minutes += minutesWatched(entry);
+            if (entry.score) {
+                scores[entry.score]++; scoreSum += entry.score; scored++;
+                if (entry.mean) { diffSum += entry.score - entry.mean; diffCount++; }
+            }
+            if (entry.status === 'plan_to_watch') continue;   // tastes come from what you've actually watched
+            for (const genre of entry.genres || []) {
+                const g = genres.get(genre) || { name: genre, count: 0, scoreSum: 0, scored: 0 };
+                g.count++;
+                if (entry.score) { g.scoreSum += entry.score; g.scored++; }
+                genres.set(genre, g);
+            }
+            const type = TYPES[typeGroup(entry.mediaType)] || 'Other';
+            types.set(type, (types.get(type) || 0) + 1);
+        }
+        const finished = byStatus.completed + byStatus.dropped;
+        return {
+            total: entries.length, byStatus, episodes, minutes, scores,
+            meanScore: scored ? scoreSum / scored : 0, scored,
+            vsMal: diffCount >= 3 ? diffSum / diffCount : null, vsMalCount: diffCount,
+            finishRate: finished ? byStatus.completed / finished : null,
+            genres: [...genres.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+            types: [...types.entries()].sort((a, b) => b[1] - a[1]),
+        };
+    }
+    const formatNumber = (n) => Math.round(n).toLocaleString();
+    function timeText(minutes) {
+        const days = Math.floor(minutes / 1440);
+        const hours = Math.round((minutes - days * 1440) / 60);
+        if (days) return `${days.toLocaleString()} day${days === 1 ? '' : 's'}${hours ? ` ${hours} h` : ''}`;
+        return `${Math.round(minutes / 60)} hours`;
+    }
+    function statTile(label, value, note = '') {
+        return `<div class="stat-tile"><span class="stat-tile-label">${escapeHtml(label)}</span><strong class="stat-tile-value">${escapeHtml(value)}</strong>${note ? `<span class="stat-tile-note">${escapeHtml(note)}</span>` : ''}</div>`;
+    }
+    function renderStats(panel, entries) {
+        if (!entries.length) {
+            panel.innerHTML = '<div class="empty-state">Add some anime to your MyAnimeList list to see your stats here.</div>';
+            return;
+        }
+        const st = computeStats(entries);
+        const watchedShows = st.total - st.byStatus.plan_to_watch;
+        const vs = st.vsMal == null ? null : Math.round(st.vsMal * 100) / 100;
+        const tiles = [
+            statTile('Anime on your list', formatNumber(st.total), `${formatNumber(watchedShows)} started`),
+            statTile('Episodes watched', formatNumber(st.episodes)),
+            statTile('Time watched', timeText(st.minutes), `${formatNumber(st.minutes / 60)} hours in all`),
+            statTile('Your mean score', st.scored ? st.meanScore.toFixed(2) : '–', st.scored ? `from ${formatNumber(st.scored)} scored` : 'nothing scored yet'),
+            statTile('You finish', st.finishRate == null ? '–' : `${Math.round(st.finishRate * 100)}%`, st.finishRate == null ? 'nothing finished or dropped yet' : `${st.byStatus.completed} completed · ${st.byStatus.dropped} dropped`),
+            statTile('Compared with MAL', vs == null ? '–' : `${vs > 0 ? '+' : ''}${vs.toFixed(2)}`, vs == null ? 'score a few more shows' : vs > 0.05 ? 'you score higher than average' : vs < -0.05 ? 'you score lower than average' : 'you score about the same'),
+        ].join('');
+
+        // Status: one stacked bar, with a key that names and counts every part.
+        const statusParts = STATUSES.filter(([value]) => st.byStatus[value]);
+        const statusBar = statusParts.map(([value, label]) => {
+            const n = st.byStatus[value];
+            const pct = (n / st.total) * 100;
+            return `<a class="stats-stack-part mal-status-${value}" href="${listHash(value, defaultListView())}" style="flex-grow:${n}" data-tip="${escapeHtml(`${label}: ${n} (${Math.round(pct)}%)`)}" aria-label="${escapeHtml(`${label}: ${n}`)}"></a>`;
+        }).join('');
+        const statusKey = STATUSES.map(([value, label]) => `<a class="stats-key-item mal-status-${value}" href="${listHash(value, defaultListView())}"><i aria-hidden="true"></i>${escapeHtml(label)}<b>${st.byStatus[value]}</b></a>`).join('');
+
+        // Score spread: 1 to 10, the count above each bar.
+        const maxScore = Math.max(...st.scores.slice(1), 1);
+        const scoreBars = st.scores.slice(1).map((n, i) => {
+            const score = i + 1;
+            return `<div class="stats-col" tabindex="0" data-tip="${escapeHtml(`${score} · ${SCORE_LABELS[score]}: ${n} anime`)}" aria-label="${escapeHtml(`Score ${score}: ${n} anime`)}"><span class="stats-col-value">${n || ''}</span><span class="stats-col-bar${n ? '' : ' empty'}" style="height:${n ? Math.max(4, (n / maxScore) * 100) : 0}%"></span><span class="stats-col-label">${score}</span></div>`;
+        }).join('');
+
+        // Favourite genres: the 10 you've watched most, with your average score for each.
+        const topGenres = st.genres.slice(0, 10);
+        const maxGenre = topGenres[0]?.count || 1;
+        const genreRows = topGenres.map(g => {
+            const avg = g.scored ? (g.scoreSum / g.scored).toFixed(1) : '';
+            return `<a class="stats-row" href="${listHash('all', { ...defaultListView(), genre: g.name })}" data-tip="${escapeHtml(`${g.name}: ${g.count} anime${avg ? `, your average ${avg}` : ''}`)}"><span class="stats-row-label">${escapeHtml(g.name)}</span><span class="stats-row-track"><span class="stats-row-bar" style="width:${(g.count / maxGenre) * 100}%"></span></span><span class="stats-row-value">${g.count}${avg ? `<small>★ ${avg}</small>` : ''}</span></a>`;
+        }).join('');
+
+        const maxType = st.types[0]?.[1] || 1;
+        const typeRows = st.types.map(([type, n]) => `<div class="stats-row" data-tip="${escapeHtml(`${type}: ${n} anime`)}"><span class="stats-row-label">${escapeHtml(type)}</span><span class="stats-row-track"><span class="stats-row-bar" style="width:${(n / maxType) * 100}%"></span></span><span class="stats-row-value">${n}</span></div>`).join('');
+
+        panel.innerHTML = `
+            <div class="stats-tiles">${tiles}</div>
+            <section class="stats-card">
+                <h3>Your list by status</h3>
+                <div class="stats-stack" role="img" aria-label="${escapeHtml(STATUSES.map(([value, label]) => `${label} ${st.byStatus[value]}`).join(', '))}">${statusBar}</div>
+                <div class="stats-key">${statusKey}</div>
+            </section>
+            <div class="stats-pair">
+                <section class="stats-card">
+                    <h3>How you score</h3>
+                    ${st.scored ? `<div class="stats-cols" role="group" aria-label="Number of anime at each score">${scoreBars}</div>` : '<p class="stats-empty">Score some anime on MyAnimeList to see this.</p>'}
+                </section>
+                <section class="stats-card">
+                    <h3>Favourite genres</h3>
+                    ${topGenres.length ? `<div class="stats-rows">${genreRows}</div>` : '<p class="stats-empty">Start watching something to see this.</p>'}
+                </section>
+            </div>
+            ${st.types.length ? `<section class="stats-card"><h3>What you watch</h3><div class="stats-rows">${typeRows}</div></section>` : ''}
+            <p class="stats-footnote">Time watched uses each show's episode length from MyAnimeList. Genres and formats count the anime you've started (not Plan to Watch).</p>`;
     }
 
     /* Tiles or rows. A per-device preference, like MyAnimeList's own list style. */
@@ -954,13 +1085,31 @@ const MalSync = (() => {
     // Save anything still waiting before leaving the page or closing the tab.
     window.addEventListener('hashchange', () => flushAll());
     window.addEventListener('pagehide', () => flushAll({ keepalive: true }));
-    window.addEventListener('storage', event => { if ([AUTH_KEY, LIST_KEY, RELAY_KEY].includes(event.key)) { listCache = null; renderSettings(); refreshViews(); } });
+    window.addEventListener('storage', event => { if ([AUTH_KEY, LIST_KEY, RELAY_KEY].includes(event.key)) { listCache = null; renderSettings(); emit(); } });
     document.addEventListener('DOMContentLoaded', renderSettings);
     document.addEventListener('DOMContentLoaded', initListToolbar);
 
     // MAL ids on your list (any status), so Surprise Me can suggest something new.
     const listedMalIds = () => new Set(isLoggedIn() ? Object.keys(loadList().entries).map(Number) : []);
 
-    return { renderMyList, renderProgressPanel, handleCallback, openByMalId, refreshViews, startLogin, logout, refreshList, isLoggedIn, isConfigured, listedMalIds, relayUrl };
+    /* ---------- for other pages (recommendations, seasonal chart) ---------- */
+    const listEntries = () => (isLoggedIn() && isConfigured() ? Object.values(loadList().entries).map(entry => ({ ...entry })) : []);
+    const entryFor = malId => (isLoggedIn() && isConfigured() ? getEntry(Number(malId)) : null);
+    function subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }
+    // Adds an anime (by its MAL id) to Plan to Watch. Returns false when not logged in.
+    function addToPlanToWatch(info) {
+        const malId = Number(info?.id);
+        if (!malId) return false;
+        if (!isConfigured() || !isLoggedIn()) {
+            toast(isConfigured() ? 'Log in with MyAnimeList (Profile Settings) to add anime to your list.' : 'Connect MyAnimeList in Profile Settings to keep a list.', 'warn');
+            return false;
+        }
+        if (getEntry(malId)) return true;
+        applyChange(malId, info, { status: 'plan_to_watch' });
+        toast(`Added “${displayTitleOf({ title: info.title, titleEn: info.titleEn })}” to Plan to Watch.`, 'success');
+        return true;
+    }
+
+    return { renderMyList, renderProgressPanel, handleCallback, openByMalId, refreshViews, startLogin, logout, refreshList, isLoggedIn, isConfigured, listedMalIds, relayUrl, listEntries, entryFor, subscribe, addToPlanToWatch, statusLabel: status => STATUS_LABEL[status] || '' };
 })();
 window.MalSync = MalSync;

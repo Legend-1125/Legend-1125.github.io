@@ -39,6 +39,7 @@
 <button class="nav-btn active" data-tab="view-home">Home</button>
 <button class="nav-btn" data-tab="view-history">My List</button>
 <button class="nav-btn" data-tab="view-schedule">Schedule</button>
+<button class="nav-btn" data-tab="view-seasonal">Seasonal</button>
 <button class="nav-btn" data-tab="view-news">News</button>
 <button class="nav-btn" id="shuffle-btn">
 <svg fill="none" height="14" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" viewbox="0 0 24 24" width="14"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" x2="21" y1="20" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" x2="21" y1="15" y2="21"></line></svg>
@@ -124,6 +125,8 @@
 <div class="hero-indicators" id="hero-indicators"></div>
 </div>
 </div>
+<!-- For you: recommendations from your MyAnimeList list (logged in only) -->
+<div class="for-you-rows" id="for-you-rows"></div>
 <!-- Row 1: Trending Now -->
 <div class="content-row">
 <div class="row-header">
@@ -401,6 +404,7 @@
 <p class="mylist-count hidden" id="mylist-count" aria-live="polite"></p>
 <div class="mylist-notice hidden" id="mylist-notice" role="status"></div>
 <div class="card-grid" id="mal-list-grid"></div>
+<div class="mylist-stats hidden" id="mylist-stats"></div>
 <div class="history-panel" id="history-panel">
 <div class="history-panel-header"><p class="page-subtitle">Anime you've opened on AniZone (saved on this device).</p><button class="btn-danger" id="clear-click-history">Clear History</button></div>
 <div class="card-grid" id="click-history-grid"></div>
@@ -408,6 +412,20 @@
 </section>
 
 <!-- VIEW: NEWS -->
+<section class="tab-view hidden" id="view-seasonal"><div class="page-shell">
+<div class="page-header"><div><h2>Seasonal Chart</h2><p class="page-subtitle" id="seasonal-subtitle">Anime starting this season</p></div></div>
+<nav class="season-switch" id="season-switch" aria-label="Season"></nav>
+<div class="seasonal-toolbar">
+<select class="filter-pill" id="seasonal-format" aria-label="Format"></select>
+<select class="filter-pill" id="seasonal-genre" aria-label="Genre"></select>
+<select class="filter-pill" id="seasonal-sort" aria-label="Sort by"></select>
+<button type="button" class="seasonal-toggle hidden" id="seasonal-hide-listed" aria-pressed="false">Hide shows on my list</button>
+<span class="seasonal-count" id="seasonal-count" aria-live="polite"></span>
+</div>
+<p class="news-status hidden" id="seasonal-status" role="status"></p>
+<div class="season-grid" id="season-grid"></div>
+<div class="season-more"><button class="btn-secondary hidden" id="season-more-btn" type="button">Show more</button></div>
+</div></section>
 <section class="tab-view hidden" id="view-news"><div class="page-shell"><div class="page-header"><div><h2>Anime News</h2><p class="page-subtitle">Latest stories from around the anime world</p></div><button class="btn-secondary" id="refresh-news-btn">Refresh</button></div><nav class="mylist-tabs news-sources hidden" id="news-sources" aria-label="News sources"></nav><p class="news-status hidden" id="news-status" role="status" aria-live="polite"></p><div class="news-grid" id="news-grid"></div><div class="news-pagination hidden" id="news-pagination"><button class="btn-secondary" id="news-prev-btn" type="button">Previous</button><span id="news-page-label">Page 1</span><button class="btn-secondary" id="news-next-btn" type="button">Next</button></div></div></section>
 </main>
 <!-- VOICE ACTOR MODAL -->

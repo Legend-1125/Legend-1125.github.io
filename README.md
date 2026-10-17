@@ -242,6 +242,18 @@ The large hero area displays trending anime with:
 
 The hero rotates through currently trending titles.
 
+### Recommended for you
+
+When you're logged in with MyAnimeList, Home starts with rows picked for you:
+
+- **Recommended for you**: suggestions drawn from the shows you scored 8 or higher
+  (or, if you haven't scored many, your recent completed and watching shows)
+- **Because you watched …**: follow-ups for two of those shows
+
+Suggestions come from AniList users' recommendations. Anything already on your
+list, not yet released, or 18+ (while 18+ is off) is left out. The rows update
+when your list changes and are kept for 12 hours.
+
 ### Trending Now
 
 Shows anime currently receiving strong attention on AniList.
@@ -421,13 +433,49 @@ Schedule data is cached briefly to reduce repeated API requests while still keep
 
 Release times are displayed using the user's browser and device time settings.
 
+### Seasonal Chart
+
+Open **Seasonal** from the navigation bar to see every anime starting in a season:
+
+- **Last season / This season / Next season** tabs, plus ‹ › to step further
+- Filters for format (TV, TV Short, Movie, ONA, OVA, Special) and genre
+- Sort by popularity, score, trending, start date or title
+- Each card shows the studio, episodes, source, when the next episode airs (or
+  when the show starts), genres, a short synopsis, score and member count
+- **+ Plan to Watch** adds a show to your MyAnimeList list in one click; shows
+  already on your list show their status instead
+- **Hide shows on my list** (when logged in)
+
+The season and filters are kept in the page address, so they survive a refresh
+and can be shared.
+
 ---
 
 ## 11. My List and History
 
-Open **My List** to view anime previously opened in AniZone.
+Open **My List** to see your MyAnimeList list (when logged in) and your
+AniZone browsing history.
 
-This feature works as local viewing history rather than a synced AniList or MyAnimeList account list.
+With MyAnimeList connected, the tabs are **All**, **Watching**, **Completed**,
+**On Hold**, **Dropped**, **Plan to Watch**, **Stats** and **History**. The list
+tabs have search, sorting, filters, and a tiles/list switch.
+
+### Stats
+
+The **Stats** tab is worked out from your MyAnimeList list:
+
+- Anime on your list, episodes watched and time watched (from each show's
+  episode length)
+- Your mean score, and how it compares with MyAnimeList's scores for the same shows
+- How many of the shows you finish (completed vs dropped)
+- Your list by status, how you score (1–10), favourite genres (with your average
+  score for each) and the formats you watch
+
+Click a status or genre to open your list filtered by it.
+
+### History
+
+History works on any device without logging in.
 
 ### How titles are added
 
@@ -462,15 +510,18 @@ History is saved in browser `localStorage`. It remains after refresh but does no
 
 ## 12. News
 
-Open **News** to view recent anime news stories from MyAnimeList.
+Open **News** to view recent anime news from MyAnimeList, Crunchyroll News,
+Anime News Network, Anime Corner and Honey's Anime, newest first. Tabs at the
+top show all sources together or one site at a time. (The sites are read by the
+MyAnimeList relay; without it, News shows MyAnimeList only.)
 
 The News page can show:
 
 - Article image
-- Publication date
+- Which site the story is from, and when it was published
 - Headline
 - Short excerpt
-- Link to read the full story on MyAnimeList
+- Link to read the full story on that site
 
 ### Refresh
 
