@@ -162,9 +162,9 @@ function escapeHtml(value) {
     return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 function stripHtml(value) {
-    const element = document.createElement('div');
-    element.innerHTML = value || '';
-    return element.textContent || element.innerText || '';
+    // DOMParser builds an inert document: unlike innerHTML on a <div>, nothing in it
+    // loads or runs (no image requests, no onerror handlers).
+    return new DOMParser().parseFromString(String(value || ''), 'text/html').body.textContent || '';
 }
 function showLoading(show) { loading?.classList.toggle('hidden', !show); }
 function scrollPageToTop() {
@@ -2548,161 +2548,279 @@ async function fetchThemes(anime){
         box.innerHTML=rows.length?rows.map(([kind,title])=>`<div class="music-item"><div><strong>${kind}</strong><small>${escapeHtml(title)}</small></div><a class="see-more-btn" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${encodeURIComponent(`${title} ${displayTitle(anime)}`)}">Search</a></div>`).join(''):'<div class="empty-state">No opening or ending songs are listed for this title.</div>';
     }catch(e){if(e.name==='AbortError'||!isCurrentDetail(anime))return;box.innerHTML='<div class="empty-state"><strong>Theme songs are temporarily unavailable.</strong><span>They come from MyAnimeList, which isn\'t responding right now.</span></div>';}
 }
+/* ==========================================
+   NEWS (MyAnimeList)
+   Page 1 comes from MAL's RSS feed: about 14 KB instead of a full web page,
+   with exact publish times and full-size images. Later pages come from MAL's
+   news pages (?p=2, ...), whose 100x156 thumbnails are swapped for the
+   full-size originals. MAL blocks direct browser requests (CORS), so both go
+   through public relays raced against each other. Saved stories are shown
+   instantly and refreshed in the background.
+   ========================================== */
 let newsPage = 1;
-const NEWS_PAGE_SIZE = 15;
-const NEWS_CACHE_TTL = 30 * 60 * 1000;
+const NEWS_PAGE_SIZE = 20;                         // MAL lists 20 stories per page
+const NEWS_FRESH_MS = 30 * 60 * 1000;              // older than this: refresh in the background
+const NEWS_KEEP_MS = 7 * 24 * 60 * 60 * 1000;      // saved stories are shown for up to a week
+const NEWS_RELAY_TIMEOUT_MS = 12000;
+const NEWS_CACHE_VERSION = 'v6';
+const NEWS_RELAYS = Object.freeze([
+    url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    url => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    url => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+]);
 const malNewsPageCache = new Map();
+const newsInflight = new Map();
+let newsRenderToken = 0;
 
-function parseMalNewsHtml(html, limit = NEWS_PAGE_SIZE) {
-    const decode = value => {
-        const textarea = document.createElement('textarea');
-        textarea.innerHTML = String(value || '');
-        return textarea.value;
-    };
-    const strip = value => stripHtml(decode(value)).replace(/\s+/g, ' ').trim();
-    const absolute = url => {
-        const value = decode(url || '').trim();
-        if (!value) return '';
-        if (value.startsWith('//')) return `https:${value}`;
-        if (value.startsWith('/')) return `https://myanimelist.net${value}`;
-        return value.replace(/^http:\/\//i, 'https://');
-    };
+function newsCacheKey(page) { return `anizone:mal-news:page:${page}:${NEWS_CACHE_VERSION}`; }
+
+// Relay responses are untrusted: decode text with an inert parser and only keep https images.
+function plainNewsText(value) {
+    let text = String(value || '');
+    for (let i = 0; i < 2 && /&(?:[a-z]+|#\d+|#x[\da-f]+);|<[a-z/]/i.test(text); i++) text = stripHtml(text);
+    return text.replace(/\s+/g, ' ').trim();
+}
+function safeNewsImage(url) {
+    const value = String(url || '').trim().replace(/^\/\//, 'https://');
+    return /^https:\/\/[^\s"'<>]+$/i.test(value) ? value : '';
+}
+// https://cdn.myanimelist.net/r/100x156/s/common/uploaded_files/x.jpeg?s=...
+//   -> https://cdn.myanimelist.net/s/common/uploaded_files/x.jpeg  (the original upload)
+function fullSizeMalImage(url) {
+    try {
+        const parsed = new URL(url);
+        if (parsed.hostname !== 'cdn.myanimelist.net') return url;
+        const match = parsed.pathname.match(/^\/r\/\d+x\d+(\/.+)$/);
+        return match ? `https://cdn.myanimelist.net${match[1]}` : url;
+    } catch { return url; }
+}
+function malNewsId(href) { return String(href || '').match(/(?:^|myanimelist\.net)\/news\/(\d+)/)?.[1] || null; }
+function malNewsUrl(id) { return `https://myanimelist.net/news/${id}`; }
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const MAL_DATE_PATTERN = /((?:Today|Yesterday),\s*\d{1,2}:\d{2}\s*[AP]M|[A-Z][a-z]{2}\s+\d{1,2},\s*(?:\d{4},?\s*)?\d{1,2}:\d{2}\s*[AP]M|\d+\s+(?:minute|hour|day)s?\s+ago)\s+by\s/;
+// MAL list dates look like "Oct 14, 9:43 PM", "Yesterday, 3:22 AM" or "5 hours ago".
+function parseMalNewsDate(text, now = new Date()) {
+    const value = String(text || '').trim();
+    const toHours = (h, ampm) => (Number(h) % 12) + (/pm/i.test(ampm || '') ? 12 : 0);
+    let m = value.match(/^(\d+)\s+(minute|hour|day)s?\s+ago/i);
+    if (m) return new Date(now.getTime() - Number(m[1]) * { minute: 6e4, hour: 36e5, day: 864e5 }[m[2].toLowerCase()]).toISOString();
+    m = value.match(/^(Today|Yesterday),\s*(\d{1,2}):(\d{2})\s*([AP]M)/i);
+    if (m) {
+        const date = new Date(now);
+        if (/yesterday/i.test(m[1])) date.setDate(date.getDate() - 1);
+        date.setHours(toHours(m[2], m[4]), Number(m[3]), 0, 0);
+        return date.toISOString();
+    }
+    m = value.match(/^([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),\s*(?:(\d{4}),?\s*)?(\d{1,2}):(\d{2})\s*([AP]M)/i);
+    if (m && MONTHS.includes(m[1].toLowerCase())) {
+        const date = new Date(Number(m[3] || now.getFullYear()), MONTHS.indexOf(m[1].toLowerCase()), Number(m[2]), toHours(m[4], m[6]), Number(m[5]));
+        if (!m[3] && date - now > 2 * 864e5) date.setFullYear(date.getFullYear() - 1); // "Dec 30" seen in January
+        return date.toISOString();
+    }
+    return '';
+}
+
+function parseMalNewsRss(xmlText, limit = NEWS_PAGE_SIZE) {
+    const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+    if (doc.getElementsByTagName('parsererror').length) throw new Error('The MyAnimeList news feed could not be read.');
     const items = [];
     const seen = new Set();
-    const linkPattern = /<a[^>]+href=["']((?:https:\/\/myanimelist\.net)?\/news\/\d+[^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
-    for (const match of html.matchAll(linkPattern)) {
-        const url = absolute(match[1].split('?')[0]);
-        const title = strip(match[2]);
-        if (!title || title.length < 8 || seen.has(url)) continue;
-        const at = match.index || 0;
-        const context = html.slice(Math.max(0, at - 2600), Math.min(html.length, at + 4800));
-        const imageMatches = [...context.matchAll(/<(?:img|source)[^>]+(?:data-srcset|srcset|data-src|src)=["']([^"']+)["']/gi)];
-        let image = '';
-        for (const imageMatch of imageMatches) {
-            const candidate = absolute(String(imageMatch[1]).split(/[ ,]/)[0]);
-            if (/^https:\/\//i.test(candidate) && !/icon|logo|sprite|avatar/i.test(candidate)) {
-                image = candidate;
-                break;
-            }
-        }
-        const dateMatch = context.match(/(?:datetime=["']([^"']+)["']|class=["'][^"']*(?:date|information)[^"']*["'][^>]*>([\s\S]*?)<\/)/i);
-        const summaryMatch = context.match(/<(?:div|p)[^>]+class=["'][^"']*(?:text|summary|description)[^"']*["'][^>]*>([\s\S]*?)<\/(?:div|p)>/i);
+    for (const item of doc.getElementsByTagName('item')) {
+        const field = name => item.getElementsByTagName(name)[0]?.textContent?.trim() || '';
+        const id = malNewsId(field('link'));
+        if (!id || seen.has(id)) continue;
+        const media = item.getElementsByTagNameNS('*', 'thumbnail')[0] || item.getElementsByTagNameNS('*', 'content')[0] || item.getElementsByTagName('enclosure')[0];
+        const thumbnail = safeNewsImage(media?.getAttribute('url') || media?.textContent);
+        const published = new Date(field('pubDate'));
+        const title = plainNewsText(field('title'));
+        if (!title) continue;
+        seen.add(id);
         items.push({
             title,
-            url,
-            date: strip(dateMatch?.[1] || dateMatch?.[2] || ''),
-            excerpt: strip(summaryMatch?.[1] || '').slice(0, 500),
-            image,
+            url: malNewsUrl(id),
+            date: Number.isNaN(published.getTime()) ? '' : published.toISOString(),
+            excerpt: plainNewsText(field('description')).slice(0, 500),
+            image: safeNewsImage(fullSizeMalImage(thumbnail)),
+            thumbnail,
         });
-        seen.add(url);
         if (items.length >= limit) break;
     }
     return items;
 }
 
-function readNewsCache(page, allowStale = false) {
-    const key = `anizone:mal-news:page:${page}:v5`;
+// Reads MAL's news list page without relying on its class names: each story is
+// the headline link, the picture linked to the same story, and the text around them.
+function parseMalNewsHtml(html, limit = NEWS_PAGE_SIZE) {
+    const doc = new DOMParser().parseFromString(html, 'text/html'); // inert: nothing in it runs or loads
+    const links = [...doc.querySelectorAll('a[href]')].map(a => ({ a, id: malNewsId(a.getAttribute('href')) })).filter(link => link.id);
+    const items = [];
+    const seen = new Set();
+    for (const { a, id } of links) {
+        if (seen.has(id) || a.querySelector('img')) continue;
+        const title = plainNewsText(a.textContent);
+        if (title.length < 8 || /^\d+\s+comments?$/i.test(title)) continue;
+        const imageLink = links.find(link => link.id === id && link.a.querySelector('img'))?.a;
+        const img = imageLink?.querySelector('img');
+        const thumbnail = safeNewsImage(img?.getAttribute('data-src') || img?.getAttribute('src') || (img?.getAttribute('srcset') || '').split(/[ ,]/)[0]);
+        let story = a.parentElement;
+        if (imageLink) while (story && !story.contains(imageLink)) story = story.parentElement;
+        else story = story?.parentElement;
+        if (!story || story === doc.body) story = a.parentElement;
+        const storyText = plainNewsText(story?.textContent);
+        const dateText = storyText.match(MAL_DATE_PATTERN)?.[1] || '';
+        const excerpt = [...(story?.querySelectorAll('p, div, span') || [])]
+            .filter(el => !el.contains(a) && !el.querySelector('img') && !MAL_DATE_PATTERN.test(`${el.textContent} `))
+            .map(el => plainNewsText(el.textContent))
+            .filter(text => text.length > 40 && text !== title)
+            .sort((x, y) => y.length - x.length)[0] || '';
+        seen.add(id);
+        items.push({ title, url: malNewsUrl(id), date: parseMalNewsDate(dateText), excerpt: excerpt.slice(0, 500), image: safeNewsImage(fullSizeMalImage(thumbnail)), thumbnail });
+        if (items.length >= limit) break;
+    }
+    return items;
+}
+
+function readNewsCache(page) {
+    if (malNewsPageCache.has(page)) return malNewsPageCache.get(page);
     try {
-        const cached = JSON.parse(localStorage.getItem(key) || 'null');
-        if (!cached?.items?.length) return null;
-        if (!allowStale && Date.now() - cached.savedAt > NEWS_CACHE_TTL) return null;
+        const cached = JSON.parse(localStorage.getItem(newsCacheKey(page)) || 'null');
+        if (!cached?.items?.length || Date.now() - cached.savedAt > NEWS_KEEP_MS) return null;
+        malNewsPageCache.set(page, cached);
         return cached;
     } catch { return null; }
 }
-
 function writeNewsCache(page, result) {
     const value = { ...result, savedAt: Date.now() };
     malNewsPageCache.set(page, value);
-    try { localStorage.setItem(`anizone:mal-news:page:${page}:v5`, JSON.stringify(value)); } catch {}
+    try { localStorage.setItem(newsCacheKey(page), JSON.stringify(value)); } catch {}
     return value;
 }
+function isNewsFresh(cached) { return Boolean(cached) && Date.now() - cached.savedAt < NEWS_FRESH_MS; }
 
-async function fetchMalNewsPage(page = 1, force = false) {
-    const safePage = Math.max(1, Number(page) || 1);
-    if (!force && malNewsPageCache.has(safePage)) return malNewsPageCache.get(safePage);
-    if (!force) {
-        const cached = readNewsCache(safePage);
-        if (cached) {
-            malNewsPageCache.set(safePage, cached);
-            return cached;
-        }
-    }
-
-    // MyAnimeList is the sole content source. The proxy URLs only relay the
-    // exact MAL news page because MAL does not permit browser CORS requests.
-    const malPage = `https://myanimelist.net/news${safePage > 1 ? `?p=${safePage}` : ''}`;
-    const relayTargets = [
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(malPage)}`,
-        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(malPage)}`,
-        `https://corsproxy.io/?url=${encodeURIComponent(malPage)}`,
-    ];
-    const fetchEndpoint = async endpoint => {
-        let lastError = null;
-        for (let attempt = 0; attempt < 2; attempt++) {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 15000);
-            try {
-                const separator = endpoint.includes('?') ? '&' : '?';
-                const requestUrl = force || attempt ? `${endpoint}${separator}_=${Date.now()}-${attempt}` : endpoint;
-                const response = await fetch(requestUrl, { headers: { Accept: 'text/html' }, signal: controller.signal, cache: force ? 'no-store' : 'default' });
-                if (!response.ok) throw new Error(`News request failed (${response.status}).`);
-                const html = await response.text();
-                const items = parseMalNewsHtml(html, NEWS_PAGE_SIZE);
-                if (!items.length) throw new Error('No MyAnimeList news items returned.');
-                const explicitNext = new RegExp(`(?:[?&](?:p|page)=${safePage + 1})(?:[&"'])`).test(html);
-                const disabledNext = /class=["'][^"']*(?:next|pagination)[^"']*(?:disabled|off)[^"']*["']/i.test(html);
-                return { items, page: safePage, hasNextPage: explicitNext || (!disabledNext && items.length >= NEWS_PAGE_SIZE) };
-            } catch (error) {
-                lastError = error;
-                if (attempt === 0) await delay(450);
-            } finally { clearTimeout(timeout); }
-        }
-        throw lastError || new Error('Unable to load MyAnimeList news.');
+// Asks every relay at once, keeps the first good answer and cancels the rest.
+async function fetchViaNewsRelays(targetUrl, parse, { force = false } = {}) {
+    const controllers = NEWS_RELAYS.map(() => new AbortController());
+    const attempt = async (relay, index) => {
+        const controller = controllers[index];
+        const timer = setTimeout(() => controller.abort(), NEWS_RELAY_TIMEOUT_MS);
+        try {
+            const url = relay(targetUrl) + (force ? `&_=${Date.now()}` : '');
+            const response = await fetch(url, { signal: controller.signal, cache: force ? 'no-store' : 'default' });
+            if (!response.ok) throw new Error(`News relay failed (${response.status}).`);
+            return { result: parse(await response.text()), index };
+        } finally { clearTimeout(timer); }
     };
-
     try {
-        const result = await Promise.any(relayTargets.map(fetchEndpoint));
-        return writeNewsCache(safePage, result);
-    } catch (error) {
-        const stale = readNewsCache(safePage, true);
-        if (stale) return stale;
-        throw error;
+        const { result, index } = await Promise.any(NEWS_RELAYS.map(attempt));
+        controllers.forEach((controller, i) => { if (i !== index) controller.abort(); });
+        return result;
+    } catch {
+        throw new Error('MyAnimeList news is temporarily unavailable.');
     }
+}
+
+function fetchMalNewsPage(page = 1, { force = false } = {}) {
+    const safePage = Math.max(1, Number(page) || 1);
+    if (newsInflight.has(safePage)) return newsInflight.get(safePage);
+    const fromFeed = safePage === 1;
+    const target = fromFeed ? 'https://myanimelist.net/rss/news.xml' : `https://myanimelist.net/news?p=${safePage}`;
+    const parse = text => {
+        const items = fromFeed ? parseMalNewsRss(text) : parseMalNewsHtml(text);
+        if (!items.length) throw new Error('No MyAnimeList news items returned.');
+        const hasNextPage = fromFeed
+            || new RegExp(`[?&](?:p|page)=${safePage + 1}(?:[&"'#]|$)`).test(text)
+            || items.length >= NEWS_PAGE_SIZE;
+        return { items, page: safePage, hasNextPage };
+    };
+    const task = fetchViaNewsRelays(target, parse, { force })
+        .then(result => writeNewsCache(safePage, result))
+        .finally(() => newsInflight.delete(safePage));
+    newsInflight.set(safePage, task);
+    return task;
 }
 
 function prefetchNewsPage(page) {
     const safePage = Math.max(1, Number(page) || 1);
-    if (malNewsPageCache.has(safePage) || readNewsCache(safePage)) return;
+    if (isNewsFresh(readNewsCache(safePage))) return;
     fetchMalNewsPage(safePage).catch(() => {});
+}
+// Fetch page 1 quietly a few seconds after the site opens, so News is ready when clicked.
+function scheduleNewsPrefetch() {
+    const whenIdle = window.requestIdleCallback || (callback => setTimeout(callback, 1));
+    setTimeout(() => whenIdle(() => prefetchNewsPage(1), { timeout: 5000 }), 4000);
+}
+
+function setNewsStatus(text = '') {
+    const status = document.getElementById('news-status');
+    if (!status) return;
+    status.textContent = text;
+    status.classList.toggle('hidden', !text);
+}
+function renderNewsSkeletons(grid, count = 6) {
+    grid.innerHTML = Array.from({ length: count }, () => '<article class="news-card news-skeleton" aria-hidden="true"><div class="news-card-image"></div><div class="news-card-body"><i></i><i></i><i></i></div></article>').join('');
+    grid.setAttribute('aria-busy', 'true');
 }
 
 async function loadNews(force = false, page = newsPage) {
     const grid = document.getElementById('news-grid');
-    if (!grid) return;
+    if (!grid) return false;
     const requestedPage = Math.max(1, Number(page) || 1);
-    const previousHtml = grid.innerHTML;
-    const hadStories = Boolean(grid.querySelector('.news-card'));
-    if (!hadStories) grid.innerHTML = '<div class="spinner"></div>';
-    document.getElementById('news-prev-btn')?.setAttribute('disabled', '');
-    document.getElementById('news-next-btn')?.setAttribute('disabled', '');
-    try {
-        const result = await fetchMalNewsPage(requestedPage, force);
+    const token = ++newsRenderToken;
+    const cached = force ? null : readNewsCache(requestedPage);
+    const showingStories = Boolean(grid.querySelector('.news-card:not(.news-skeleton)'));
+
+    if (cached) {
+        // Saved stories appear straight away; fresh ones replace them if needed.
         newsPage = requestedPage;
-        renderNewsItems(result.items, grid);
+        renderNewsItems(cached.items, grid);
+        updateNewsPagination({ currentPage: newsPage, hasNextPage: cached.hasNextPage });
+        if (isNewsFresh(cached)) {
+            setNewsStatus('');
+            if (cached.hasNextPage) prefetchNewsPage(newsPage + 1);
+            return true;
+        }
+        setNewsStatus('Checking for newer stories…');
+    } else if (showingStories) {
+        grid.classList.add('is-refreshing');
+        setNewsStatus(requestedPage === newsPage ? 'Refreshing…' : `Loading page ${requestedPage}…`);
+        document.getElementById('news-prev-btn')?.setAttribute('disabled', '');
+        document.getElementById('news-next-btn')?.setAttribute('disabled', '');
+    } else {
+        renderNewsSkeletons(grid);
+        setNewsStatus('');
+        updateNewsPagination({ currentPage: requestedPage, hasNextPage: false });
+    }
+
+    try {
+        const result = await fetchMalNewsPage(requestedPage, { force });
+        if (token !== newsRenderToken) return false;
+        newsPage = requestedPage;
+        const unchanged = cached && cached.items.map(item => item.url).join() === result.items.map(item => item.url).join();
+        if (!unchanged) renderNewsItems(result.items, grid);
         updateNewsPagination({ currentPage: newsPage, hasNextPage: result.hasNextPage });
+        setNewsStatus('');
         if (result.hasNextPage) prefetchNewsPage(newsPage + 1);
-        scrollPageToTop();
         return true;
     } catch (error) {
-        if (hadStories) {
-            grid.innerHTML = previousHtml;
+        if (token !== newsRenderToken) return false;
+        if (cached) {
+            setNewsStatus('Showing saved stories. MyAnimeList could not be reached just now.');
+        } else if (showingStories) {
             updateNewsPagination({ currentPage: newsPage, hasNextPage: true });
+            setNewsStatus('');
             siteAlert('That MyAnimeList news page could not be loaded. Your current page has been kept.', { title: 'News unavailable' });
         } else {
             updateNewsPagination({ currentPage: newsPage, hasNextPage: false });
+            setNewsStatus('');
             grid.innerHTML = `<div class="empty-state api-error"><strong>MyAnimeList news is temporarily unavailable.</strong><a class="btn-secondary inline-action" href="https://myanimelist.net/news" target="_blank" rel="noopener">Open MyAnimeList News ↗</a></div>`;
         }
         return false;
+    } finally {
+        if (token === newsRenderToken) {
+            grid.classList.remove('is-refreshing');
+            grid.removeAttribute('aria-busy');
+        }
     }
 }
 
@@ -2719,20 +2837,41 @@ function updateNewsPagination(pageInfo = {}) {
     controls.classList.toggle('hidden', current <= 1 && !pageInfo.hasNextPage);
 }
 
+function newsDateLabel(iso) {
+    const date = iso ? new Date(iso) : null;
+    if (!date || Number.isNaN(date.getTime())) return '';
+    const minutes = Math.round((Date.now() - date.getTime()) / 60000);
+    if (minutes >= 0 && minutes < 60) return minutes <= 1 ? 'Just now' : `${minutes} minutes ago`;
+    if (minutes >= 0 && minutes < 24 * 60) return `${Math.round(minutes / 60)} hour${Math.round(minutes / 60) === 1 ? '' : 's'} ago`;
+    return date.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
 function renderNewsItems(items, grid = document.getElementById('news-grid')) {
     if (!grid) return;
+    grid.removeAttribute('aria-busy');
     if (!items.length) {
         grid.innerHTML = '<div class="empty-state">No recent MyAnimeList news stories were returned.</div>';
         return;
     }
-    grid.innerHTML = items.slice(0, NEWS_PAGE_SIZE).map(item => {
-        const date = item.date ? new Date(item.date) : null;
-        const dateLabel = date && !Number.isNaN(date.getTime()) ? date.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : 'MyAnimeList News';
-        const image = item.image
-            ? `<img src="${escapeHtml(item.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.classList.add('image-missing');this.remove()">`
+    grid.innerHTML = items.slice(0, NEWS_PAGE_SIZE).map((item, index) => {
+        const image = item.image || item.thumbnail || '';
+        const fallback = item.thumbnail && item.thumbnail !== image ? item.thumbnail : '';
+        const picture = image
+            ? `<img src="${escapeHtml(image)}"${fallback ? ` data-fallback="${escapeHtml(fallback)}"` : ''} alt="" ${index < 3 ? 'fetchpriority="high"' : 'loading="lazy"'} decoding="async" referrerpolicy="no-referrer">`
             : '';
-        return `<article class="news-card"><div class="news-card-image${item.image ? '' : ' image-missing'}">${image}<span>MyAnimeList News</span></div><div class="news-card-body"><small>${escapeHtml(dateLabel)}</small><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml((item.excerpt || '').slice(0, 240))}</p><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Read on MyAnimeList →</a></div></article>`;
+        const dateLabel = newsDateLabel(item.date) || 'MyAnimeList News';
+        return `<article class="news-card"><div class="news-card-image${image ? '' : ' image-missing'}">${picture}<span>MyAnimeList News</span></div><div class="news-card-body"><small>${escapeHtml(dateLabel)}</small><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml((item.excerpt || '').slice(0, 240))}</p><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Read on MyAnimeList →</a></div></article>`;
     }).join('');
+    // Full-size picture failed? Fall back to MAL's thumbnail, then to the placeholder.
+    grid.querySelectorAll('.news-card-image img').forEach(img => img.addEventListener('error', () => {
+        if (img.dataset.fallback) {
+            img.src = img.dataset.fallback;
+            delete img.dataset.fallback;
+        } else {
+            img.parentElement.classList.add('image-missing');
+            img.remove();
+        }
+    }));
 }
 
 function enhanceSelect(select){
@@ -2774,6 +2913,7 @@ function initConnectedExperience(){
     document.getElementById('refresh-news-btn')?.addEventListener('click',()=>loadNews(true, newsPage));
     document.getElementById('news-prev-btn')?.addEventListener('click',()=>{ if(newsPage > 1) { scrollPageToTop(); loadNews(false, newsPage - 1); } });
     document.getElementById('news-next-btn')?.addEventListener('click',()=>{ scrollPageToTop(); loadNews(false, newsPage + 1); });
+    scheduleNewsPrefetch();
     const baseRender=renderAnimeDetails;
     renderAnimeDetails=function(anime){ detailSectionState={animeId:null,loaded:new Set()}; baseRender(anime); renderEnhancedDetails(anime); };
 }
