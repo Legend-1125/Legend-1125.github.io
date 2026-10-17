@@ -80,6 +80,27 @@ their browser.
   the relay, for every visitor (no login needed). If the relay can't answer,
   AniZone falls back to Jikan.
 
+## Optional: HD home banners (TMDB)
+
+AniList's banner pictures are small, so on big screens the home banner
+shows the poster instead. TMDB has full-screen artwork for most anime. To use
+it (free, about 5 minutes):
+
+1. Create a free account at <https://www.themoviedb.org/signup> and confirm
+   your email.
+2. Open <https://www.themoviedb.org/settings/api>, click **Create** /
+   **Request an API key**, choose **Developer**, accept the terms and fill in
+   the form (Type of use: *Website*, Application name: `AniZone`, URL: your
+   site, Summary: `Personal anime site; shows banner images`).
+3. On the same page, copy the **API Read Access Token** (the long one that
+   starts with `eyJ`), not the short "API Key".
+4. In Cloudflare, open your Worker → **Settings → Variables and Secrets** →
+   **Add**: name `TMDB_TOKEN`, type **Secret**, paste the token, then
+   **Deploy**.
+
+Without it, everything still works; the banner just shows the poster for shows
+without a large enough picture.
+
 ## Updating the relay
 
 When `mal-relay.js` changes, open the Worker → **Edit code**, replace
@@ -95,3 +116,4 @@ stay as they are.
 | MAL says the redirect URL is invalid | The App Redirect URL must be exactly your Worker address + `/oauth/callback`. |
 | "MyAnimeList refused the login" | Re-copy the Client Secret into `MAL_CLIENT_SECRET`. |
 | "Your MyAnimeList login has expired" | Log in again (MAL logins last about a month). |
+| Home banners still show posters, not full pictures | `TMDB_TOKEN` isn't set or isn't the *Read Access Token*; check step "HD home banners". Some shows have no TMDB picture. |

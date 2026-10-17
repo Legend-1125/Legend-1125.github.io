@@ -1697,11 +1697,42 @@ body {
     will-change:opacity, transform;
 }
 .hero-bg-layer.active { opacity:1; transform:scale(1); }
-/* Only a poster to show: blur it into a backdrop instead of stretching it. */
-.hero-bg-layer.poster-fill { filter:blur(22px) brightness(.6) saturate(1.15); transform:scale(1.12); }
-.hero-bg-layer.poster-fill.active { transform:scale(1.1); }
+.hero-layer-bg { position:absolute; inset:0; background-size:cover; background-position:center 25%; }
+/* No picture big enough to fill the banner sharply: show the poster itself, crisp,
+   beside the text, over a dimmed and blurred copy of the artwork. */
+.hero-bg-layer.spotlight .hero-layer-bg { inset:-40px; filter:blur(36px) brightness(.42) saturate(1.2); }
+.hero-layer-poster {
+    position:absolute; z-index:1; right:max(7%, 72px); top:50%;
+    height:min(66%, 560px); aspect-ratio:2 / 3; width:auto; object-fit:cover;
+    border-radius:16px; transform:translateY(-44%);
+    box-shadow:0 28px 70px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.08);
+}
+.hero-layer-poster[hidden] { display:none; }
+/* With a poster showing, only shade behind the text and along the bottom edge, so the poster stays bright. */
+.hero-billboard.spotlight-mode .hero-vignette {
+    background:
+        linear-gradient(to right, rgba(15,15,15,0.9) 15%, rgba(15,15,15,0.35) 50%, rgba(15,15,15,0) 62%),
+        linear-gradient(to top, var(--bg-black) 0%, rgba(15,15,15,0) 16%);
+}
+@media (max-width: 900px) {
+    .hero-billboard.spotlight-mode .hero-vignette {
+        background:
+            linear-gradient(to right, rgba(15,15,15,0.85) 10%, rgba(15,15,15,0.3) 100%),
+            linear-gradient(to top, var(--bg-black) 0%, rgba(15,15,15,0) 40%);
+    }
+}
+@media (max-width: 1100px) {
+    .hero-layer-poster { right:max(4%, 60px); height:min(52%, 420px); }
+}
+/* Narrow screens: the text needs the full width, so the poster becomes the backdrop
+   (a portrait poster suits a portrait screen), dimmed under the text. */
+@media (max-width: 900px) {
+    .hero-layer-poster { display:none; }
+    .hero-bg-layer.spotlight .hero-layer-bg { inset:0; filter:brightness(.55); background-image:var(--hero-poster, none) !important; background-position:center 15%; }
+}
 .hero-vignette { z-index:1; }
-.hero-content, .hero-nav-arrow { z-index:3; }
+.hero-content { z-index:3; }
+.hero-nav-arrow { z-index:4; }   /* above the text box, which spans the full width on phones */
 .cast-language-toggle button { transition:background-color .22s ease, color .22s ease, box-shadow .22s ease, transform .22s ease; }
 .cast-language-toggle button[data-cast-language="JAPANESE"].active {
     background:var(--accent-red); color:#fff; box-shadow:0 0 14px rgba(229,9,20,.28);
@@ -2434,3 +2465,6 @@ html, body { overflow-x: clip; }
 /* My List filters open downwards, so the arrow points down / up. */
 .mylist-filter-toggle .discover-filter-chevron { transform: rotate(45deg); margin-top: -3px; }
 .mylist-filter-toggle[aria-expanded="true"] .discover-filter-chevron { transform: rotate(-135deg); margin-top: 3px; }
+
+/* Data sources credit at the bottom of Profile Settings */
+.data-credits { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.08); font-size: 11px; line-height: 1.45; }

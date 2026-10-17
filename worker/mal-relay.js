@@ -14,6 +14,10 @@
  *                                 (only the few list/profile paths AniZone uses)
  *   GET  /public/anime/<id>    -> { id, mean, scoringUsers }: an anime's MAL score,
  *                                 for every visitor, no login needed
+ *   GET  /public/backdrop?t=<title>&t=...&year=&format=
+ *                              -> { path, width, height }: a full-screen, text-free
+ *                                 picture for the home page banner, from TMDB
+ *                                 (only when TMDB_TOKEN is set)
  *
  * It stores nothing. Tokens go straight back to the visitor's browser.
  *
@@ -22,6 +26,7 @@
  *   MAL_CLIENT_SECRET  your MAL API Client Secret                   (secret)
  *   ALLOWED_ORIGINS    sites allowed to use this relay, comma separated (text), e.g.
  *                      https://legend-1125.github.io,http://localhost:8000
+ *   TMDB_TOKEN         optional: TMDB "API Read Access Token", for HD home banners (secret)
  */
 
 const MAL_AUTHORIZE_URL = 'https://myanimelist.net/v1/oauth2/authorize';
@@ -148,6 +153,93 @@ async function publicAnime(url, origin, env, ctx) {
     return withCors(response);
 }
 
+// Home page banners in HD. AniList and Kitsu banners are small strips; TMDB has
+// full-screen (16:9, up to 4K) artwork for most anime. TMDB doesn't know AniList
+// or MAL ids, so the show is found by title: the English, romaji and Japanese
+// titles, then the series name without its season/arc ("Tokyo Revengers: ...").
+// Only Japanese animation is accepted, and a shortened name must match exactly.
+const TMDB_API = 'https://api.themoviedb.org/3';
+const BACKDROP_TTL_SECONDS = 7 * 24 * 60 * 60;
+const BACKDROP_MISS_TTL_SECONDS = 24 * 60 * 60;
+const plainTitle = (text) => String(text || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+function seriesName(title) {
+    const base = String(title || '')
+        .split(/\s*[:：]\s+|\s+-\s+/)[0]
+        .replace(/\s+(season|part|cour)\s*\d+.*$/i, '')
+        .replace(/\s+\d+(st|nd|rd|th)\s+season.*$/i, '')
+        .replace(/\s+(2nd|3rd|\d+th)?\s*(arc|hen|-hen)$/i, '')
+        .trim();
+    return base.length >= 4 && base !== title ? base : '';
+}
+async function tmdbGet(path, env) {
+    const response = await fetch(TMDB_API + path, { headers: { Authorization: `Bearer ${env.TMDB_TOKEN}`, Accept: 'application/json' } });
+    if (!response.ok) { const error = new Error(`TMDB answered ${response.status}`); error.status = response.status; throw error; }
+    return response.json();
+}
+async function findBackdrop(titles, year, format, env) {
+    const wanted = new Set(titles.map(plainTitle).filter(Boolean));
+    const queries = [];
+    for (const title of titles) if (title && !queries.some(q => q.text === title)) queries.push({ text: title, exact: false });
+    for (const title of titles) {
+        const base = seriesName(title);
+        if (base && !queries.some(q => q.text === base)) { queries.push({ text: base, exact: true }); wanted.add(plainTitle(base)); }
+    }
+    const kinds = format === 'MOVIE' ? ['movie', 'tv'] : ['tv', 'movie'];
+    for (const kind of kinds) {
+        for (const query of queries.slice(0, 6)) {
+            const params = new URLSearchParams({ query: query.text, include_adult: 'false' });
+            const data = await tmdbGet(`/search/${kind}?${params}`, env);
+            const anime = (data.results || []).filter(result => (result.genre_ids || []).includes(16)
+                && (result.original_language === 'ja' || (result.origin_country || []).includes('JP')));
+            const names = (result) => [result.name, result.original_name, result.title, result.original_title].map(plainTitle).filter(Boolean);
+            const q = plainTitle(query.text);
+            let match = anime.find(result => names(result).some(name => wanted.has(name)));
+            if (!match && !query.exact) match = anime.find(result => names(result).some(name => name.length >= 4 && (name.includes(q) || q.includes(name))));
+            if (match && kind === 'movie' && year) {
+                const released = Number(String(match.release_date || '').slice(0, 4));
+                if (released && Math.abs(released - year) > 1) match = null;
+            }
+            if (!match) continue;
+            const images = await tmdbGet(`/${kind}/${match.id}/images?include_image_language=null,en,ja`, env);
+            const backdrops = (images.backdrops || []).filter(b => b.file_path && b.width >= 1280);
+            backdrops.sort((a, b) => (a.iso_639_1 == null ? 0 : 1) - (b.iso_639_1 == null ? 0 : 1) || (b.vote_average || 0) - (a.vote_average || 0) || (b.width || 0) - (a.width || 0));
+            const best = backdrops[0];
+            if (best) return { path: best.file_path, width: best.width, height: best.height, tmdbId: match.id, kind, name: match.name || match.title };
+            return null;
+        }
+    }
+    return null;
+}
+async function publicBackdrop(url, origin, env, ctx) {
+    if (!env.TMDB_TOKEN) return json({ error: 'tmdb_not_configured', message: 'Add TMDB_TOKEN to the relay for HD banners.' }, 501, origin, env);
+    const titles = url.searchParams.getAll('t').map(t => t.trim().slice(0, 200)).filter(Boolean).slice(0, 3);
+    if (!titles.length) return json({ error: 'invalid_request' }, 400, origin, env);
+    const year = Number(url.searchParams.get('year')) || 0;
+    const format = String(url.searchParams.get('format') || '').toUpperCase().replace(/[^A-Z_]/g, '').slice(0, 12);
+    const key = new URLSearchParams();
+    titles.forEach(t => key.append('t', t)); if (year) key.set('year', String(year)); if (format) key.set('format', format);
+    const cache = typeof caches !== 'undefined' ? caches.default : null;
+    const cacheKey = new Request(`${url.origin}/public/backdrop?${key}`);
+    const withCors = (response) => {
+        const headers = new Headers(response.headers);
+        Object.entries(corsHeaders(origin, env)).forEach(([name, value]) => headers.set(name, value));
+        return new Response(response.body, { status: response.status, headers });
+    };
+    try { const hit = cache && await cache.match(cacheKey); if (hit) return withCors(hit); } catch {}
+    let found;
+    try { found = await findBackdrop(titles, year, format, env); }
+    catch (error) {
+        return json({ error: 'upstream_error', message: error.status === 401 ? 'TMDB refused the token. Re-copy TMDB_TOKEN.' : 'TMDB could not be reached.' }, error.status === 401 ? 502 : 504, origin, env);
+    }
+    const ttl = found ? BACKDROP_TTL_SECONDS : BACKDROP_MISS_TTL_SECONDS;
+    const response = new Response(JSON.stringify(found || { path: null }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${ttl}`, Vary: 'Origin' },
+    });
+    try { const stored = cache && cache.put(cacheKey, response.clone()); if (stored) { if (ctx?.waitUntil) ctx.waitUntil(stored); else await stored; } } catch {}
+    return withCors(response);
+}
+
 async function proxyApi(request, url, origin, env) {
     const path = url.pathname.replace(/^\/api\//, '');
     const rule = API_RULES.find(candidate => candidate.pattern.test(path));
@@ -202,6 +294,7 @@ export default {
                 return exchangeToken({ grant_type: 'refresh_token', refresh_token }, origin, env);
             }
             if (url.pathname.startsWith('/api/')) return proxyApi(request, url, origin, env);
+            if (request.method === 'GET' && url.pathname === '/public/backdrop') return publicBackdrop(url, origin, env, ctx);
             if (request.method === 'GET' && url.pathname.startsWith('/public/')) return publicAnime(url, origin, env, ctx);
             return json({ error: 'not_found' }, 404, origin, env);
         } catch (error) {
