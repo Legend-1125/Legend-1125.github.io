@@ -80,6 +80,11 @@ their browser.
   the relay, for every visitor (no login needed). If the relay can't answer,
   AniZone falls back to Jikan.
 
+- **News** from MyAnimeList, Crunchyroll News, Anime News Network, Anime Corner
+  and Anime Herald: the relay reads each site's news feed (no setup needed) and
+  finds a picture for stories whose feed has none. If the relay can't serve
+  news, the News page shows MyAnimeList only.
+
 ## Optional: HD home banners (TMDB)
 
 AniList's banner pictures are small, so on big screens the home banner

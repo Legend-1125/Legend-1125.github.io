@@ -864,7 +864,8 @@ function parseRoute(hash = location.hash) {
     if (section === 'browse' && BROWSE_TARGETS.has(id)) return { name: 'browse', target: id, page };
     if (section === 'studio' && numericId) return { name: 'studio', id: numericId, studioName: params.get('name') || '', page };
     if (section === 'list' && segments.length === 1) return { name: 'list', tab: params.get('tab') || '', params: Object.fromEntries(params) };
-    if (['schedule', 'news'].includes(section) && segments.length === 1) return { name: section };
+    if (section === 'news' && segments.length === 1) return { name: 'news', source: params.get('source') || 'all', page };
+    if (section === 'schedule' && segments.length === 1) return { name: section };
     // MyAnimeList sync (mal.js): login return and "open this MAL entry in AniZone".
     if (section === 'mal-callback') return { name: 'mal-callback', code: params.get('code') || '', state: params.get('state') || '', error: params.get('error') || '' };
     if (section === 'mal' && numericId) return { name: 'mal-anime', id: numericId };
@@ -995,7 +996,8 @@ function renderRoute({ fresh = false } = {}) {
             pendingScrollRestore = null;
             setPageTitle('News');
             showView('view-news');
-            loadNews();
+            newsSource = NEWS_SOURCE_IDS.has(route.source) ? route.source : 'all';
+            loadNews(false, route.page);
             break;
         case 'anime':
             pendingScrollRestore = null;
@@ -3051,10 +3053,220 @@ function prefetchNewsPage(page) {
     if (isNewsFresh(readNewsCache(safePage))) return;
     fetchMalNewsPage(safePage).catch(() => {});
 }
-// Fetch page 1 quietly a few seconds after the site opens, so News is ready when clicked.
+// Fetch the news quietly a few seconds after the site opens, so News is ready when clicked.
 function scheduleNewsPrefetch() {
     const whenIdle = window.requestIdleCallback || (callback => setTimeout(callback, 1));
-    setTimeout(() => whenIdle(() => prefetchNewsPage(1), { timeout: 5000 }), 4000);
+    setTimeout(() => whenIdle(() => {
+        if (multiSourceNewsAvailable()) NEWS_SOURCES.forEach(source => { if (!isNewsFresh(readNewsSourceCache(source.id))) fetchNewsSource(source.id).catch(() => {}); });
+        else prefetchNewsPage(1);
+    }, { timeout: 5000 }), 4000);
+}
+
+/* ==========================================
+   NEWS FROM SEVERAL SITES
+   Each site's feed is read by the AniZone relay (worker/mal-relay.js,
+   /public/news), which also finds a picture for stories whose feed has none.
+   Stories are merged newest first, with a filter per site. Each site is saved
+   on this device and refreshed in the background, like MyAnimeList news was.
+   If the relay can't serve news, the page falls back to MyAnimeList only.
+   ========================================== */
+const NEWS_SOURCES = Object.freeze([
+    { id: 'mal', name: 'MyAnimeList', link: 'https://myanimelist.net/news' },
+    { id: 'crunchyroll', name: 'Crunchyroll News', link: 'https://www.crunchyroll.com/news' },
+    { id: 'ann', name: 'Anime News Network', link: 'https://www.animenewsnetwork.com/news/' },
+    { id: 'animecorner', name: 'Anime Corner', link: 'https://animecorner.me/category/news/' },
+    { id: 'animeherald', name: 'Anime Herald', link: 'https://www.animeherald.com/' },
+]);
+const NEWS_SOURCE_IDS = new Set(NEWS_SOURCES.map(source => source.id));
+const NEWS_SOURCE_CACHE_VERSION = 'v1';
+const NEWS_SOURCE_TIMEOUT_MS = 15000;
+const NEWS_FIRST_PAINT_MS = 4000;          // first visit: show what has arrived by then
+let newsSource = 'all';
+let newsRelaySupport = 'unknown';         // 'unknown' | 'yes' | 'no' (relay too old or missing)
+const newsSourceMemory = new Map();
+const newsSourceInflight = new Map();
+const newsSourceErrors = new Map();
+let pendingNewsRedraw = null;
+
+const newsSourceInfo = (id) => NEWS_SOURCES.find(source => source.id === id) || NEWS_SOURCES[0];
+function newsHash(source = newsSource, page = 1) { return routeHash('/news', { source: source === 'all' ? '' : source, page }); }
+function newsRelayUrl() { return typeof MalSync !== 'undefined' ? MalSync.relayUrl() : ''; }
+function multiSourceNewsAvailable() { return Boolean(newsRelayUrl()) && newsRelaySupport !== 'no'; }
+function newsSourceCacheKey(id) { return `anizone:news:${id}:${NEWS_SOURCE_CACHE_VERSION}`; }
+function readNewsSourceCache(id) {
+    if (newsSourceMemory.has(id)) return newsSourceMemory.get(id);
+    try {
+        const cached = JSON.parse(localStorage.getItem(newsSourceCacheKey(id)) || 'null');
+        if (!cached?.items?.length || Date.now() - cached.savedAt > NEWS_KEEP_MS) return null;
+        newsSourceMemory.set(id, cached);
+        return cached;
+    } catch { return null; }
+}
+function writeNewsSourceCache(id, items) {
+    const value = { items, savedAt: Date.now() };
+    newsSourceMemory.set(id, value);
+    try { localStorage.setItem(newsSourceCacheKey(id), JSON.stringify(value)); } catch {}
+    return value;
+}
+// The relay's answer is treated as untrusted: plain text only, https links and pictures only.
+function cleanRelayNewsItem(raw, source) {
+    const title = plainNewsText(raw?.title).slice(0, 300);
+    const url = String(raw?.url || '');
+    if (!title || !/^https:\/\/[^\s"'<>]+$/i.test(url)) return null;
+    const when = raw?.date ? new Date(raw.date) : null;
+    const thumbnail = safeNewsImage(raw?.image);
+    return {
+        source, title, url,
+        date: when && !Number.isNaN(when.getTime()) ? when.toISOString() : '',
+        excerpt: plainNewsText(raw?.excerpt).slice(0, 500),
+        image: source === 'mal' ? safeNewsImage(fullSizeMalImage(thumbnail)) : thumbnail,
+        thumbnail,
+    };
+}
+function fetchNewsSource(id, { force = false } = {}) {
+    if (newsSourceInflight.has(id)) return newsSourceInflight.get(id);
+    const name = newsSourceInfo(id).name;
+    const task = (async () => {
+        const relay = newsRelayUrl();
+        if (!relay) throw new Error('No AniZone relay is set up.');
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), NEWS_SOURCE_TIMEOUT_MS);
+        let response, payload = null;
+        try {
+            response = await fetch(`${relay}/public/news?source=${encodeURIComponent(id)}`, { signal: controller.signal, cache: force ? 'no-store' : 'default', headers: { Accept: 'application/json' } });
+            try { payload = await response.json(); } catch {}
+        } catch (error) {
+            throw new Error(error.name === 'AbortError' ? `${name} took too long to answer.` : `${name} could not be reached.`);
+        } finally { clearTimeout(timer); }
+        if (response.status === 404 && payload?.error !== 'unknown_source') {
+            newsRelaySupport = 'no';           // the relay predates multi-source news
+            throw new Error('The AniZone relay needs updating for news from other sites.');
+        }
+        if (!response.ok) throw new Error(payload?.message || `${name} could not be reached.`);
+        newsRelaySupport = 'yes';
+        const items = (payload?.items || []).map(item => cleanRelayNewsItem(item, id)).filter(Boolean);
+        if (!items.length) throw new Error(`${name} sent no stories.`);
+        return writeNewsSourceCache(id, items);
+    })().then(result => { newsSourceErrors.delete(id); return result; }, error => { newsSourceErrors.set(id, error.message); throw error; })
+        .finally(() => newsSourceInflight.delete(id));
+    newsSourceInflight.set(id, task);
+    return task;
+}
+function mergedNews(ids) {
+    const seen = new Set();
+    const items = [];
+    for (const id of ids) for (const item of readNewsSourceCache(id)?.items || []) {
+        if (seen.has(item.url)) continue;
+        seen.add(item.url);
+        items.push({ ...item, source: id });
+    }
+    const time = (item) => item.date ? new Date(item.date).getTime() : 0;
+    return items.sort((a, b) => time(b) - time(a));
+}
+function renderNewsSourceTabs() {
+    const bar = document.getElementById('news-sources');
+    if (!bar) return;
+    const show = multiSourceNewsAvailable();
+    bar.classList.toggle('hidden', !show);
+    if (!show) return;
+    const count = (id) => readNewsSourceCache(id)?.items?.length || 0;
+    const total = NEWS_SOURCES.reduce((sum, source) => sum + count(source.id), 0);
+    const tab = (id, label, n, extra = '') => `<a class="mylist-tab news-source-tab${newsSource === id ? ' active' : ''}${extra}" href="${newsHash(id)}"${newsSource === id ? ' aria-current="page"' : ''}>${id === 'all' ? '' : `<i class="news-dot news-src-${id}" aria-hidden="true"></i>`}${escapeHtml(label)}${n ? `<span>${n}</span>` : ''}</a>`;
+    bar.innerHTML = tab('all', 'All sources', total) + NEWS_SOURCES.map(source => {
+        const failed = newsSourceErrors.has(source.id) && !count(source.id);
+        return tab(source.id, source.name, count(source.id), failed ? ' unavailable' : '');
+    }).join('');
+    bar.querySelectorAll('.news-source-tab.unavailable').forEach(link => { link.title = 'Not reachable right now'; });
+}
+function setNewsStatusWithAction(text, label, action) {
+    setNewsStatus(text);
+    const status = document.getElementById('news-status');
+    if (!status || !label) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'news-status-action';
+    button.textContent = label;
+    button.addEventListener('click', action);
+    status.append(' ', button);
+}
+function newsProblemNote(ids) {
+    const failed = ids.filter(id => newsSourceErrors.has(id));
+    if (!failed.length) return '';
+    const names = failed.map(id => newsSourceInfo(id).name);
+    const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0];
+    const saved = failed.every(id => readNewsSourceCache(id));
+    return saved ? `Showing saved stories from ${list}; it couldn't be reached just now.` : `${list} couldn't be reached just now.`;
+}
+
+async function loadNews(force = false, page = 1) {
+    const requestedPage = Math.max(1, Number(page) || 1);
+    renderNewsSourceTabs();
+    if (!multiSourceNewsAvailable()) return loadMalNews(force, requestedPage);
+    // MyAnimeList's older pages come from its own news pages, as before.
+    if (newsSource === 'mal' && requestedPage > 1) return loadMalNews(force, requestedPage);
+    return loadMultiSourceNews(force, requestedPage);
+}
+
+async function loadMultiSourceNews(force, page) {
+    const grid = document.getElementById('news-grid');
+    if (!grid) return false;
+    const token = ++newsRenderToken;
+    pendingNewsRedraw = null;
+    newsPage = page;
+    const ids = newsSource === 'all' ? NEWS_SOURCES.map(source => source.id) : [newsSource];
+    const sourceLink = newsSourceInfo(newsSource === 'all' ? 'mal' : newsSource);
+
+    const draw = () => {
+        if (token !== newsRenderToken) return false;
+        pendingNewsRedraw = null;
+        renderNewsSourceTabs();
+        const list = mergedNews(ids);
+        if (!list.length) return false;
+        const pages = Math.ceil(list.length / NEWS_PAGE_SIZE);
+        const current = Math.min(page, pages);
+        newsPage = current;
+        renderNewsItems(list.slice((current - 1) * NEWS_PAGE_SIZE, current * NEWS_PAGE_SIZE), grid);
+        updateNewsPagination({ currentPage: current, hasNextPage: current < pages || newsSource === 'mal' });
+        return true;
+    };
+    // New stories while someone is reading: offer them instead of reshuffling the page.
+    const redraw = () => {
+        if (token !== newsRenderToken) return;
+        renderNewsSourceTabs();
+        const reading = window.scrollY > 300 && grid.querySelector('.news-card:not(.news-skeleton)');
+        if (!reading) { draw(); return; }
+        pendingNewsRedraw = draw;
+    };
+
+    const shown = draw();
+    if (!shown) { renderNewsSkeletons(grid); updateNewsPagination({ currentPage: page, hasNextPage: false }); }
+    const stale = ids.filter(id => force || !isNewsFresh(readNewsSourceCache(id)));
+    if (!stale.length) { setNewsStatus(newsProblemNote(ids)); return true; }
+    setNewsStatus(shown ? 'Checking for newer stories…' : '');
+    if (shown && force) grid.classList.add('is-refreshing');
+
+    let painted = shown;
+    const tasks = stale.map(id => fetchNewsSource(id, { force }).then(() => { if (painted) redraw(); }, () => {}));
+    if (!painted) {
+        await Promise.race([Promise.allSettled(tasks), waitMs(NEWS_FIRST_PAINT_MS)]);
+        if (token !== newsRenderToken) return false;
+        painted = draw();
+    }
+    await Promise.allSettled(tasks);
+    if (token !== newsRenderToken) return false;
+    grid.classList.remove('is-refreshing');
+    grid.removeAttribute('aria-busy');
+    if (newsRelaySupport === 'no') { renderNewsSourceTabs(); return loadMalNews(force, page); }   // older relay: MyAnimeList only
+    if (!painted && !draw()) {
+        renderNewsSourceTabs();
+        updateNewsPagination({ currentPage: 1, hasNextPage: false });
+        setNewsStatus('');
+        grid.innerHTML = `<div class="empty-state api-error"><strong>${escapeHtml(newsSource === 'all' ? 'News is temporarily unavailable.' : `${sourceLink.name} is temporarily unavailable.`)}</strong><a class="btn-secondary inline-action" href="${escapeHtml(sourceLink.link)}" target="_blank" rel="noopener">Open ${escapeHtml(sourceLink.name)} ↗</a></div>`;
+        return false;
+    }
+    if (pendingNewsRedraw) setNewsStatusWithAction(newsProblemNote(ids) || 'Newer stories are ready.', 'Show them', () => { scrollPageToTop(); draw(); setNewsStatus(newsProblemNote(ids)); });
+    else setNewsStatus(newsProblemNote(ids));
+    return true;
 }
 
 function setNewsStatus(text = '') {
@@ -3068,7 +3280,9 @@ function renderNewsSkeletons(grid, count = 6) {
     grid.setAttribute('aria-busy', 'true');
 }
 
-async function loadNews(force = false, page = newsPage) {
+// MyAnimeList only, through public relays: used when the AniZone relay can't serve
+// news (not set up, or an older relay), and for MyAnimeList pages 2 and later.
+async function loadMalNews(force = false, page = newsPage) {
     const grid = document.getElementById('news-grid');
     if (!grid) return false;
     const requestedPage = Math.max(1, Number(page) || 1);
@@ -3156,7 +3370,7 @@ function renderNewsItems(items, grid = document.getElementById('news-grid')) {
     if (!grid) return;
     grid.removeAttribute('aria-busy');
     if (!items.length) {
-        grid.innerHTML = '<div class="empty-state">No recent MyAnimeList news stories were returned.</div>';
+        grid.innerHTML = '<div class="empty-state">No recent news stories were returned.</div>';
         return;
     }
     grid.innerHTML = items.slice(0, NEWS_PAGE_SIZE).map((item, index) => {
@@ -3165,8 +3379,9 @@ function renderNewsItems(items, grid = document.getElementById('news-grid')) {
         const picture = image
             ? `<img src="${escapeHtml(image)}"${fallback ? ` data-fallback="${escapeHtml(fallback)}"` : ''} alt="" ${index < 3 ? 'fetchpriority="high"' : 'loading="lazy"'} decoding="async" referrerpolicy="no-referrer">`
             : '';
-        const dateLabel = newsDateLabel(item.date) || 'MyAnimeList News';
-        return `<article class="news-card"><div class="news-card-image${image ? '' : ' image-missing'}">${picture}<span>MyAnimeList News</span></div><div class="news-card-body"><small>${escapeHtml(dateLabel)}</small><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml((item.excerpt || '').slice(0, 240))}</p><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Read on MyAnimeList →</a></div></article>`;
+        const source = newsSourceInfo(item.source || 'mal');
+        const dateLabel = newsDateLabel(item.date);
+        return `<article class="news-card"><div class="news-card-image${image ? '' : ' image-missing'}">${picture}<span>${escapeHtml(source.name)}</span></div><div class="news-card-body"><small><b class="news-src-label"><i class="news-dot news-src-${escapeHtml(source.id)}" aria-hidden="true"></i>${escapeHtml(source.name)}</b>${dateLabel ? ` · ${escapeHtml(dateLabel)}` : ''}</small><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml((item.excerpt || '').slice(0, 240))}</p><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Read on ${escapeHtml(source.name)} →</a></div></article>`;
     }).join('');
     // Full-size picture failed? Fall back to MAL's thumbnail, then to the placeholder.
     grid.querySelectorAll('.news-card-image img').forEach(img => img.addEventListener('error', () => {
@@ -3218,8 +3433,8 @@ function initConnectedExperience(){
     initGridDiscoverFilters();
     initDetailPreferences();
     document.getElementById('refresh-news-btn')?.addEventListener('click',()=>loadNews(true, newsPage));
-    document.getElementById('news-prev-btn')?.addEventListener('click',()=>{ if(newsPage > 1) { scrollPageToTop(); loadNews(false, newsPage - 1); } });
-    document.getElementById('news-next-btn')?.addEventListener('click',()=>{ scrollPageToTop(); loadNews(false, newsPage + 1); });
+    document.getElementById('news-prev-btn')?.addEventListener('click',()=>{ if(newsPage > 1) { scrollPageToTop(); navigate(newsHash(newsSource, newsPage - 1)); } });
+    document.getElementById('news-next-btn')?.addEventListener('click',()=>{ scrollPageToTop(); navigate(newsHash(newsSource, newsPage + 1)); });
     scheduleNewsPrefetch();
     const baseRender=renderAnimeDetails;
     renderAnimeDetails=function(anime){ detailSectionState={animeId:null,loaded:new Set()}; baseRender(anime); renderEnhancedDetails(anime); };

@@ -2469,3 +2469,21 @@ html, body { overflow-x: clip; }
 
 /* Data sources credit at the bottom of Profile Settings */
 .data-credits { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.08); font-size: 11px; line-height: 1.45; }
+
+/* News from several sites: a colour per site, shown on the filters and each story */
+.news-dot { display:inline-block; width:8px; height:8px; margin-right:7px; border-radius:50%; vertical-align:1px; background:var(--news-src, #888); }
+.news-src-mal { --news-src:#3b82f6; }
+.news-src-crunchyroll { --news-src:#f47521; }
+.news-src-ann { --news-src:#22c3a6; }
+.news-src-animecorner { --news-src:#ef4c78; }
+.news-src-animeherald { --news-src:#a78bfa; }
+.news-source-tab.unavailable { opacity:.5; }
+.news-card-body small { display:flex; flex-wrap:wrap; align-items:center; gap:0 4px; color:var(--text-muted); }
+.news-src-label { display:inline-flex; align-items:center; color:rgba(255,255,255,.88); font-weight:700; }
+.news-status-action { margin-left:4px; padding:0; border:0; background:none; color:var(--accent-cyan); font:inherit; font-weight:700; cursor:pointer; }
+.news-status-action:hover { text-decoration:underline; }
+@media (max-width: 600px) {
+    .news-sources { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; margin-inline:-4%; padding-inline:4%; }
+    .news-sources::-webkit-scrollbar { display:none; }
+    .news-source-tab { flex:0 0 auto; }
+}

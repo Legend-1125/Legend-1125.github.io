@@ -18,6 +18,8 @@
  *                              -> { path, width, height }: a full-screen, text-free
  *                                 picture for the home page banner, from TMDB
  *                                 (only when TMDB_TOKEN is set)
+ *   GET  /public/news?source=<id> -> { source, name, items: [{ title, url, date, image, excerpt }] }
+ *                                 the latest stories from one of the anime news sites below
  *
  * It stores nothing. Tokens go straight back to the visitor's browser.
  *
@@ -240,6 +242,144 @@ async function publicBackdrop(url, origin, env, ctx) {
     return withCors(response);
 }
 
+// Anime news from several sites. Their feeds can't be read by web pages directly
+// (no CORS), so the relay reads them, finds a picture for stories whose feed has
+// none (from the article's own preview image), and returns one tidy format.
+// Only these feeds can be read: the relay is not a general-purpose proxy.
+const NEWS_SOURCES = {
+    mal: { name: 'MyAnimeList', feed: 'https://myanimelist.net/rss/news.xml' },
+    crunchyroll: { name: 'Crunchyroll News', feed: 'https://cr-news-api-service.prd.crunchyrollsvc.com/v1/en-US/rss' },
+    ann: { name: 'Anime News Network', feed: 'https://www.animenewsnetwork.com/all/rss.xml?ann-edition=us' },
+    animecorner: { name: 'Anime Corner', feed: 'https://animecorner.me/feed/' },
+    animeherald: { name: 'Anime Herald', feed: 'https://www.animeherald.com/feed/' },
+};
+const NEWS_MAX_ITEMS = 25;
+const NEWS_TTL_SECONDS = 15 * 60;
+const NEWS_FETCH_TIMEOUT_MS = 8000;
+const NEWS_IMAGE_TIMEOUT_MS = 4000;
+const NEWS_HEADERS = { 'User-Agent': 'Mozilla/5.0 (compatible; AniZoneNews/1.0; +https://legend-1125.github.io)', Accept: 'application/rss+xml, application/xml, text/xml, text/html;q=0.8, */*;q=0.5' };
+const articleImages = new Map();   // article URL -> picture, kept while this relay instance is warm
+const newsMemory = new Map();      // source -> { at, body }
+
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', hellip: '…', mdash: '—', ndash: '–', lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', laquo: '«', raquo: '»', middot: '·', bull: '•', eacute: 'é', copy: '©', reg: '®', trade: '™' };
+function decodeEntities(text) {
+    return String(text || '').replace(/&(#x[\da-f]+|#\d+|[a-z]+);/gi, (whole, code) => {
+        if (code[0] === '#') {
+            const n = code[1].toLowerCase() === 'x' ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+            return Number.isFinite(n) && n > 0 && n < 0x110000 ? String.fromCodePoint(n) : '';
+        }
+        return ENTITIES[code.toLowerCase()] ?? whole;
+    });
+}
+const unwrapCdata = (text) => String(text || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
+const stripTags = (html) => String(html).replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ');
+// Twice, because some feeds escape their HTML ("&lt;p&gt;") inside the text.
+const plainText = (html) => stripTags(decodeEntities(stripTags(unwrapCdata(html)))).replace(/\s+/g, ' ').trim();
+function xmlField(block, name) {
+    const match = block.match(new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)</${name}>`, 'i'));
+    return match ? unwrapCdata(match[1]).trim() : '';
+}
+function xmlAttr(block, name, attr) {
+    const tag = block.match(new RegExp(`<${name}\\b[^>]*>`, 'i'))?.[0] || '';
+    const value = tag.match(new RegExp(`\\b${attr}\\s*=\\s*["']([^"']+)["']`, 'i'))?.[1] || '';
+    return decodeEntities(value);
+}
+function cleanLink(href) {
+    try {
+        const url = new URL(decodeEntities(href).trim());
+        if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+        url.protocol = 'https:';
+        [...url.searchParams.keys()].filter(key => /^utm_/i.test(key)).forEach(key => url.searchParams.delete(key));
+        return url.toString();
+    } catch { return ''; }
+}
+const httpsImage = (src) => { const url = cleanLink(src); return url && !/\.svg(\?|$)/i.test(url) && !/(gravatar|feedburner|pixel|emoji|1x1)/i.test(url) ? url : ''; };
+function firstImageIn(html) {
+    for (const match of unwrapCdata(html).matchAll(/<img\b[^>]*>/gi)) {
+        const tag = match[0];
+        const src = tag.match(/\b(?:data-src|src)\s*=\s*["']([^"']+)["']/i)?.[1];
+        const width = Number(tag.match(/\bwidth\s*=\s*["']?(\d+)/i)?.[1] || 0);
+        if (src && (!width || width >= 200)) { const url = httpsImage(src); if (url) return url; }
+    }
+    return '';
+}
+function parseFeed(xml) {
+    const items = [];
+    for (const match of String(xml).matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)) {
+        const block = match[1];
+        const title = plainText(xmlField(block, 'title'));
+        const url = cleanLink(plainText(xmlField(block, 'link')) || xmlAttr(block, 'link', 'href'));
+        if (!title || !url) continue;
+        const description = xmlField(block, 'description');
+        const content = xmlField(block, 'content:encoded');
+        const dateText = xmlField(block, 'pubDate') || xmlField(block, 'dc:date') || xmlField(block, 'published');
+        const date = new Date(plainText(dateText));
+        const enclosureType = xmlAttr(block, 'enclosure', 'type');
+        const image = httpsImage(xmlAttr(block, 'media:thumbnail', 'url') || plainText(xmlField(block, 'media:thumbnail')))
+            || httpsImage(xmlAttr(block, 'media:content', 'url'))
+            || (/^image\//i.test(enclosureType) || !enclosureType ? httpsImage(xmlAttr(block, 'enclosure', 'url')) : '')
+            || firstImageIn(content) || firstImageIn(description);
+        items.push({
+            title: title.slice(0, 300),
+            url,
+            date: Number.isNaN(date.getTime()) ? '' : date.toISOString(),
+            image,
+            excerpt: plainText(description || content).slice(0, 400),
+        });
+        if (items.length >= NEWS_MAX_ITEMS) break;
+    }
+    return items;
+}
+async function fetchText(url, timeoutMs, maxBytes = 1_500_000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, { headers: NEWS_HEADERS, signal: controller.signal, redirect: 'follow' });
+        if (!response.ok) { const error = new Error(`answered ${response.status}`); error.status = response.status; throw error; }
+        const text = await response.text();
+        return text.length > maxBytes ? text.slice(0, maxBytes) : text;
+    } finally { clearTimeout(timer); }
+}
+// The article's own preview picture (what social sites show when the link is shared).
+async function articleImage(url) {
+    if (articleImages.has(url)) return articleImages.get(url);
+    let image = '';
+    try {
+        const html = (await fetchText(url, NEWS_IMAGE_TIMEOUT_MS, 400_000)).slice(0, 200_000);
+        for (const tag of html.match(/<meta\b[^>]*>/gi) || []) {
+            if (!/(?:property|name)\s*=\s*["'](?:og:image(?::secure_url)?|twitter:image(?::src)?)["']/i.test(tag)) continue;
+            image = httpsImage(tag.match(/\bcontent\s*=\s*["']([^"']+)["']/i)?.[1] || '');
+            if (image) break;
+        }
+    } catch {}
+    if (articleImages.size > 500) articleImages.clear();
+    articleImages.set(url, image);
+    return image;
+}
+async function publicNews(url, origin, env, ctx) {
+    const id = url.searchParams.get('source') || '';
+    const source = Object.prototype.hasOwnProperty.call(NEWS_SOURCES, id) ? NEWS_SOURCES[id] : null;
+    if (!source) return json({ error: 'unknown_source', sources: Object.keys(NEWS_SOURCES) }, 404, origin, env);
+    const reply = (body) => new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${NEWS_TTL_SECONDS}`, ...corsHeaders(origin, env) },
+    });
+    const remembered = newsMemory.get(id);
+    if (remembered && Date.now() - remembered.at < NEWS_TTL_SECONDS * 1000) return reply(remembered.body);
+    let items;
+    try { items = parseFeed(await fetchText(source.feed, NEWS_FETCH_TIMEOUT_MS)); }
+    catch (error) {
+        if (remembered) return reply(remembered.body);
+        return json({ error: 'source_unavailable', message: `${source.name} could not be reached (${error.message || 'no answer'}).` }, 502, origin, env);
+    }
+    if (!items.length) return json({ error: 'source_unavailable', message: `${source.name} sent no stories.` }, 502, origin, env);
+    // Stories without a picture in the feed: look up the article's preview picture (side by side).
+    await Promise.all(items.map(async item => { if (!item.image) item.image = await articleImage(item.url); }));
+    const body = JSON.stringify({ source: id, name: source.name, items });
+    newsMemory.set(id, { at: Date.now(), body });
+    return reply(body);
+}
+
 async function proxyApi(request, url, origin, env) {
     const path = url.pathname.replace(/^\/api\//, '');
     const rule = API_RULES.find(candidate => candidate.pattern.test(path));
@@ -295,6 +435,7 @@ export default {
             }
             if (url.pathname.startsWith('/api/')) return proxyApi(request, url, origin, env);
             if (request.method === 'GET' && url.pathname === '/public/backdrop') return publicBackdrop(url, origin, env, ctx);
+            if (request.method === 'GET' && url.pathname === '/public/news') return publicNews(url, origin, env, ctx);
             if (request.method === 'GET' && url.pathname.startsWith('/public/')) return publicAnime(url, origin, env, ctx);
             return json({ error: 'not_found' }, 404, origin, env);
         } catch (error) {
