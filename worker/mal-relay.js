@@ -250,10 +250,14 @@ const NEWS_SOURCES = {
     mal: { name: 'MyAnimeList', feed: 'https://myanimelist.net/rss/news.xml' },
     crunchyroll: { name: 'Crunchyroll News', feed: 'https://cr-news-api-service.prd.crunchyrollsvc.com/v1/en-US/rss' },
     ann: { name: 'Anime News Network', feed: 'https://www.animenewsnetwork.com/all/rss.xml?ann-edition=us' },
-    animecorner: { name: 'Anime Corner', feed: 'https://animecorner.me/feed/' },
-    honeysanime: { name: "Honey's Anime", feed: 'https://honeysanime.com/feed/' },
+    animecorner: { name: 'Anime Corner', feed: 'https://animecorner.me/feed/', paged: true },
+    honeysanime: { name: "Honey's Anime", feed: 'https://honeysanime.com/feed/', paged: true },
 };
-const NEWS_MAX_ITEMS = 25;
+// Older stories: ?page=2, 3, ... WordPress sites (paged: true) have older feed pages of
+// their own; for the others, later pages are the rest of their (longer) feed, 25 at a time.
+const NEWS_PAGE_ITEMS = 25;
+const NEWS_MAX_PAGE = 20;
+const NEWS_PARSE_LIMIT = 300;
 const NEWS_TTL_SECONDS = 15 * 60;
 const NEWS_FETCH_TIMEOUT_MS = 8000;
 const NEWS_IMAGE_TIMEOUT_MS = 4000;
@@ -303,7 +307,7 @@ function firstImageIn(html) {
     }
     return '';
 }
-function parseFeed(xml) {
+function parseFeed(xml, limit = NEWS_PARSE_LIMIT) {
     const items = [];
     for (const match of String(xml).matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)) {
         const block = match[1];
@@ -326,7 +330,7 @@ function parseFeed(xml) {
             image,
             excerpt: plainText(description || content).slice(0, 400),
         });
-        if (items.length >= NEWS_MAX_ITEMS) break;
+        if (items.length >= limit) break;
     }
     return items;
 }
@@ -364,19 +368,29 @@ async function publicNews(url, origin, env, ctx) {
         status: 200,
         headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${NEWS_TTL_SECONDS}`, ...corsHeaders(origin, env) },
     });
-    const remembered = newsMemory.get(id);
+    const page = Math.min(NEWS_MAX_PAGE, Math.max(1, Math.floor(Number(url.searchParams.get('page')) || 1)));
+    const memoryKey = `${id}:${page}`;
+    const remembered = newsMemory.get(memoryKey);
     if (remembered && Date.now() - remembered.at < NEWS_TTL_SECONDS * 1000) return reply(remembered.body);
-    let items;
-    try { items = parseFeed(await fetchText(source.feed, NEWS_FETCH_TIMEOUT_MS)); }
-    catch (error) {
+    const feedUrl = source.paged && page > 1 ? `${source.feed}${source.feed.includes('?') ? '&' : '?'}paged=${page}` : source.feed;
+    let items, hasMore;
+    try {
+        const all = parseFeed(await fetchText(feedUrl, NEWS_FETCH_TIMEOUT_MS));
+        if (source.paged) { items = all.slice(0, NEWS_PAGE_ITEMS); hasMore = items.length > 0; }
+        else { items = all.slice((page - 1) * NEWS_PAGE_ITEMS, page * NEWS_PAGE_ITEMS); hasMore = all.length > page * NEWS_PAGE_ITEMS; }
+    } catch (error) {
         if (remembered) return reply(remembered.body);
-        return json({ error: 'source_unavailable', message: `${source.name} could not be reached (${error.message || 'no answer'}).` }, 502, origin, env);
+        // Past a WordPress site's last page: no more stories (not an error).
+        if (page > 1 && error.status === 404) items = [];
+        else return json({ error: 'source_unavailable', message: `${source.name} could not be reached (${error.message || 'no answer'}).` }, 502, origin, env);
     }
-    if (!items.length) return json({ error: 'source_unavailable', message: `${source.name} sent no stories.` }, 502, origin, env);
+    if (!items.length && page === 1) return json({ error: 'source_unavailable', message: `${source.name} sent no stories.` }, 502, origin, env);
+    if (!items.length) hasMore = false;
     // Stories without a picture in the feed: look up the article's preview picture (side by side).
     await Promise.all(items.map(async item => { if (!item.image) item.image = await articleImage(item.url); }));
-    const body = JSON.stringify({ source: id, name: source.name, items });
-    newsMemory.set(id, { at: Date.now(), body });
+    const body = JSON.stringify({ source: id, name: source.name, page, hasMore, items });
+    if (newsMemory.size > 200) newsMemory.clear();
+    newsMemory.set(memoryKey, { at: Date.now(), body });
     return reply(body);
 }
 

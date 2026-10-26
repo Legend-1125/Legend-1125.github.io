@@ -4000,11 +4000,69 @@ function readNewsSourceCache(id) {
         return cached;
     } catch { return null; }
 }
-function writeNewsSourceCache(id, items) {
-    const value = { items, savedAt: Date.now() };
+// Each site's stories are kept on this device and added to, not replaced: a refresh adds
+// the newest, "older stories" pages add older ones. nextPage/done track how far back we've read.
+const NEWS_SOURCE_MAX_SAVED = 240;
+const newsItemTime = (item) => { const t = item?.date ? Date.parse(item.date) : NaN; return Number.isNaN(t) ? 0 : t; };
+function mergeNewsItems(first, second) {
+    const seen = new Set();
+    const merged = [];
+    for (const item of [...first, ...second]) {
+        if (!item?.url || seen.has(item.url)) continue;
+        seen.add(item.url);
+        merged.push(item);
+    }
+    return merged.sort((a, b) => newsItemTime(b) - newsItemTime(a)).slice(0, NEWS_SOURCE_MAX_SAVED);
+}
+function storeNewsSource(id, value) {
     newsSourceMemory.set(id, value);
     try { localStorage.setItem(newsSourceCacheKey(id), JSON.stringify(value)); } catch {}
     return value;
+}
+function writeNewsSourceCache(id, items, { relayPaging = false, relayHasMore = false } = {}) {
+    const previous = readNewsSourceCache(id);
+    const tracked = Boolean(previous?.nextPage);
+    // MyAnimeList's older stories come from its own news pages, so it can always go further back.
+    const done = tracked ? Boolean(previous.done) : (id === 'mal' ? false : !(relayPaging && relayHasMore));
+    return storeNewsSource(id, { items: mergeNewsItems(items, previous?.items || []), savedAt: Date.now(), nextPage: tracked ? previous.nextPage : 2, done });
+}
+const canLoadMoreNews = (id) => { const saved = readNewsSourceCache(id); return Boolean(saved) && !saved.done; };
+const newsMoreInflight = new Map();
+// One more page of older stories from a site. Resolves to how many new stories it added.
+function fetchMoreNews(id) {
+    if (newsMoreInflight.has(id)) return newsMoreInflight.get(id);
+    const task = (async () => {
+        const saved = readNewsSourceCache(id);
+        if (!saved || saved.done) return 0;
+        const page = saved.nextPage || 2;
+        let fresh = [], more = false;
+        if (id === 'mal') {
+            const result = await fetchMalNewsPage(page);
+            fresh = (result.items || []).filter(item => item?.title && /^https:\/\//.test(item.url || '')).map(item => ({ ...item, source: 'mal' }));
+            more = Boolean(result.hasNextPage);
+        } else {
+            const relay = newsRelayUrl();
+            if (!relay) return 0;
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), NEWS_SOURCE_TIMEOUT_MS);
+            let payload = null;
+            try {
+                const response = await fetch(`${relay}/public/news?source=${encodeURIComponent(id)}&page=${page}`, { signal: controller.signal, headers: { Accept: 'application/json' } });
+                try { payload = await response.json(); } catch {}
+                if (!response.ok) throw new Error(payload?.message || `${newsSourceInfo(id).name} could not be reached.`);
+            } finally { clearTimeout(timer); }
+            fresh = (payload?.items || []).map(item => cleanRelayNewsItem(item, id)).filter(Boolean);
+            more = payload?.hasMore === true;
+        }
+        const current = readNewsSourceCache(id) || saved;
+        const known = new Set(current.items.map(item => item.url));
+        const added = fresh.filter(item => !known.has(item.url)).length;
+        // Nothing new (an older relay that ignores ?page, or the end of the site): stop asking.
+        storeNewsSource(id, { ...current, items: mergeNewsItems(current.items, fresh), nextPage: page + 1, done: !more || added === 0 });
+        return added;
+    })().finally(() => newsMoreInflight.delete(id));
+    newsMoreInflight.set(id, task);
+    return task;
 }
 // The relay's answer is treated as untrusted: plain text only, https links and pictures only.
 function cleanRelayNewsItem(raw, source) {
@@ -4044,7 +4102,7 @@ function fetchNewsSource(id, { force = false } = {}) {
         newsRelaySupport = 'yes';
         const items = (payload?.items || []).map(item => cleanRelayNewsItem(item, id)).filter(Boolean);
         if (!items.length) throw new Error(`${name} sent no stories.`);
-        return writeNewsSourceCache(id, items);
+        return writeNewsSourceCache(id, items, { relayPaging: Boolean(payload && 'hasMore' in payload), relayHasMore: payload?.hasMore === true });
     })().then(result => { newsSourceErrors.delete(id); return result; }, error => { newsSourceErrors.set(id, error.message); throw error; })
         .finally(() => newsSourceInflight.delete(id));
     newsSourceInflight.set(id, task);
@@ -4102,8 +4160,6 @@ async function loadNews(force = false, page = 1) {
     const requestedPage = Math.max(1, Number(page) || 1);
     renderNewsSourceTabs();
     if (!multiSourceNewsAvailable()) return loadMalNews(force, requestedPage);
-    // MyAnimeList's older pages come from its own news pages, as before.
-    if (newsSource === 'mal' && requestedPage > 1) return loadMalNews(force, requestedPage);
     return loadMultiSourceNews(force, requestedPage);
 }
 
@@ -4126,8 +4182,34 @@ async function loadMultiSourceNews(force, page) {
         const current = Math.min(page, pages);
         newsPage = current;
         renderNewsItems(list.slice((current - 1) * NEWS_PAGE_SIZE, current * NEWS_PAGE_SIZE), grid);
-        updateNewsPagination({ currentPage: current, hasNextPage: current < pages || newsSource === 'mal' });
+        updateNewsPagination({ currentPage: current, hasNextPage: current < pages || ids.some(canLoadMoreNews) });
         return true;
+    };
+    // Older stories: when this page goes past what's saved, fetch older pages from each site
+    // (a few rounds at most). Near the end of what's saved, fetch the next lot in the background.
+    const enough = () => mergedNews(ids).length >= page * NEWS_PAGE_SIZE;
+    const deepen = async () => {
+        if (token !== newsRenderToken) return;
+        if (!enough() && ids.some(canLoadMoreNews)) {
+            setNewsStatus('Loading older stories…');
+            grid.classList.add('is-refreshing');
+            for (let round = 0; round < 6 && !enough() && ids.some(canLoadMoreNews); round++) {
+                await Promise.allSettled(ids.filter(canLoadMoreNews).map(fetchMoreNews));
+                if (token !== newsRenderToken) return;
+            }
+            grid.classList.remove('is-refreshing');
+            setNewsStatus(newsProblemNote(ids));
+            draw();
+        }
+        if (token !== newsRenderToken) return;
+        const pages = Math.ceil(mergedNews(ids).length / NEWS_PAGE_SIZE);
+        if (newsPage >= pages - 1 && ids.some(canLoadMoreNews)) {
+            Promise.allSettled(ids.filter(canLoadMoreNews).map(fetchMoreNews)).then(() => {
+                if (token !== newsRenderToken) return;
+                const total = Math.ceil(mergedNews(ids).length / NEWS_PAGE_SIZE);
+                updateNewsPagination({ currentPage: newsPage, hasNextPage: newsPage < total || ids.some(canLoadMoreNews) });
+            });
+        }
     };
     // New stories while someone is reading: offer them instead of reshuffling the page.
     const redraw = () => {
@@ -4141,7 +4223,7 @@ async function loadMultiSourceNews(force, page) {
     const shown = draw();
     if (!shown) { renderNewsSkeletons(grid); updateNewsPagination({ currentPage: page, hasNextPage: false }); }
     const stale = ids.filter(id => force || !isNewsFresh(readNewsSourceCache(id)));
-    if (!stale.length) { setNewsStatus(newsProblemNote(ids)); return true; }
+    if (!stale.length) { setNewsStatus(newsProblemNote(ids)); await deepen(); return true; }
     setNewsStatus(shown ? 'Checking for newer stories…' : '');
     if (shown && force) grid.classList.add('is-refreshing');
 
@@ -4165,7 +4247,7 @@ async function loadMultiSourceNews(force, page) {
         return false;
     }
     if (pendingNewsRedraw) setNewsStatusWithAction(newsProblemNote(ids) || 'Newer stories are ready.', 'Show them', () => { scrollPageToTop(); draw(); setNewsStatus(newsProblemNote(ids)); });
-    else setNewsStatus(newsProblemNote(ids));
+    else { setNewsStatus(newsProblemNote(ids)); await deepen(); }
     return true;
 }
 

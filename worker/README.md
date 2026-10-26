@@ -84,6 +84,9 @@ their browser.
   and Honey's Anime: the relay reads each site's news feed (no setup needed) and
   finds a picture for stories whose feed has none. If the relay can't serve
   news, the News page shows MyAnimeList only.
+  Older stories come from `?page=2, 3, …` (WordPress sites' own older feed pages,
+  or the rest of a longer feed); the News page asks for them when you go past
+  what it has saved.
 
 ## Optional: HD home banners (TMDB)
 
