@@ -589,7 +589,7 @@ const MEDIA_DETAIL_FIELDS = `
     siteUrl source countryOfOrigin hashtag
     trailer { id site thumbnail }
     externalLinks { id url site type language color icon notes isDisabled }
-    recommendations(sort: RATING_DESC, perPage: 25) { nodes { rating mediaRecommendation { id idMal isAdult title { romaji english native } coverImage { medium large extraLarge } averageScore format status episodes } } }
+    recommendations(sort: RATING_DESC, perPage: 50) { nodes { rating mediaRecommendation { id idMal isAdult title { romaji english native } coverImage { medium large extraLarge } averageScore format status episodes } } }
     staff(sort: RELEVANCE, perPage: 12) { edges { role node { id name { full native } image { large medium } primaryOccupations } } }
     rankings { rank type format year season allTime context }
     synonyms
@@ -834,7 +834,7 @@ async function findStudios(search, perPage = 5, signal) {
 
 async function getAnimeDetails(id, { signal, priority = 'interactive' } = {}) {
     const query = `query ($id: Int!) { Media(id: $id, type: ANIME) { ${MEDIA_DETAIL_FIELDS} } }`;
-    return aniRequest(query, { id: Number(id) }, { cacheKey: `detail:v2:${id}`, ttl: CACHE_TTL.details, signal, priority });
+    return aniRequest(query, { id: Number(id) }, { cacheKey: `detail:v3:${id}`, ttl: CACHE_TTL.details, signal, priority });
 }
 
 function initImageLazyLoad() {
@@ -3670,7 +3670,46 @@ function renderTrailer(anime){
         box.innerHTML=`<div class="trailer-player"><iframe allowfullscreen referrerpolicy="origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" src="https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0&enablejsapi=1&origin=${origin}&widget_referrer=${widgetReferrer}" title="${escapeHtml(displayTitle(anime))} official trailer"></iframe><a class="trailer-external-link" href="${watchUrl}" target="_blank" rel="noopener">Open on YouTube ↗</a></div>`;
     });
 }
-function renderRecommendations(anime){const box=document.getElementById('detail-recommendations'); if(!box)return; box.innerHTML=''; const recs=(anime.recommendations?.nodes||[]).map(x=>x.mediaRecommendation).filter(Boolean).filter(x=>adultContentEnabled||!x.isAdult); const shown=withoutSeen(recs); if(!shown.length)return box.innerHTML=`<div class="empty-state">${recs.length?"You've seen everything recommended here.":'No recommendations yet.'}</div>`; shown.slice(0,12).forEach(x=>box.appendChild(createAnimeCard(x)));}
+// "Recommendations" on an anime page: AniList's picks, 12 of them. With "Hide shows I've
+// seen" on, seen ones are skipped; if that leaves fewer than 12, the rest are filled with
+// well-liked shows from the same genres that you haven't seen.
+const DETAIL_RECS = 12;
+let recsTopUpToken = 0;
+function renderRecommendations(anime) {
+    const box = document.getElementById('detail-recommendations');
+    if (!box) return;
+    box.innerHTML = '';
+    recsTopUpToken++;
+    const recs = (anime.recommendations?.nodes || []).map(x => x.mediaRecommendation).filter(Boolean).filter(x => adultContentEnabled || !x.isAdult);
+    const shown = withoutSeen(recs).slice(0, DETAIL_RECS);
+    shown.forEach(x => box.appendChild(createAnimeCard(x)));
+    if (hideSeenEnabled && shown.length < DETAIL_RECS && anime.genres?.length) { topUpRecommendations(anime, box, shown); return; }
+    if (!shown.length) box.innerHTML = `<div class="empty-state">${recs.length ? "You've seen everything recommended here." : 'No recommendations yet.'}</div>`;
+}
+async function topUpRecommendations(anime, box, shown, retried = false) {
+    const token = recsTopUpToken;
+    const genres = anime.genres.slice(0, 2);
+    const seen = seenFilterIds();
+    const query = `query ($genres: [String], $id: Int${seen.length ? ', $seen: [Int]' : ''}) {
+        Page(page: 1, perPage: 40) {
+            media(type: ANIME, genre_in: $genres, id_not: $id, sort: [SCORE_DESC], popularity_greater: 15000, status_not: NOT_YET_RELEASED${seen.length ? ', idMal_not_in: $seen' : ''}${adultArgument()}) { ${MEDIA_CARD_FIELDS} }
+        }
+    }`;
+    const variables = seen.length ? { genres, id: Number(anime.id), seen } : { genres, id: Number(anime.id) };
+    let extras = [];
+    try {
+        const data = await aniRequest(query, variables, { cacheKey: `recs-fill:${adultContentEnabled}:${genres.join('+')}:${anime.id}:${seenIdsKey(seen)}`, ttl: CACHE_TTL.top, priority: 'background' });
+        extras = data?.Page?.media || [];
+    } catch (error) {
+        if (!retried && seen.length && dropServerSeenFilter(error)) return topUpRecommendations(anime, box, shown, true);
+        console.warn('Could not top up recommendations:', error.message);
+    }
+    if (token !== recsTopUpToken || !box.isConnected || currentDetailAnime?.id !== anime.id) return;
+    const have = new Set([anime.id, ...shown.map(x => x.id)]);
+    withoutSeen(extras).filter(x => !have.has(x.id) && (adultContentEnabled || !x.isAdult)).slice(0, DETAIL_RECS - shown.length)
+        .forEach(x => box.appendChild(createAnimeCard(x)));
+    if (!box.children.length) box.innerHTML = `<div class="empty-state">You've seen everything recommended here.</div>`;
+}
 function renderStaff(anime){
     const box=document.getElementById('detail-staff');
     if(!box)return;
