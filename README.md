@@ -309,6 +309,20 @@ Submitted searches open a full results page. Available filters can include:
 
 Sort options can include best match, popularity, score, and release date.
 
+### Studios in results
+
+Searching for a studio (for example "mappa") shows that studio at the top of the
+results with its most popular anime and a **See all** link to its full list, plus
+any other studios with similar names. Title matches follow below.
+
+### Spelling mistakes
+
+If a search finds nothing, AniZone checks it against popular anime titles,
+studio names and the titles on your list and in your history. When it finds a
+close match it shows those results instead and says so ("No results for
+'naurto'. Showing results for Naruto instead."). When a search finds only a
+few results, it offers **Did you mean …?** instead.
+
 ### Automatic collapse
 
 The search box collapses when it is no longer being used, including when:

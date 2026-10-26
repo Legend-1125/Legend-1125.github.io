@@ -2715,3 +2715,20 @@ html, body { overflow-x: clip; }
     .season-seg { order:-1; flex:1 1 100%; }
     .season-seg-btn { flex:1 1 0; padding:8px 4px; font-size:12.5px; }
 }
+
+/* Search: a matching studio's section, other studios, and "Did you mean" */
+.search-studios { margin-bottom:18px; }
+.search-studio { padding:18px 20px 14px; border:1px solid var(--glass-border); border-radius:16px; background:radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--accent-red) 22%, transparent), transparent 50%), var(--bg-elevated); }
+.search-studio-head { display:flex; flex-wrap:wrap; align-items:flex-end; justify-content:space-between; gap:8px 16px; }
+.search-studio-head h3 { margin:2px 0; color:#fff; font-size:24px; font-weight:800; }
+.search-studio-meta { color:var(--text-muted); font-size:13px; }
+.search-studio .slider-container { margin:0 -20px; }
+.search-studio .slider-track { padding:12px 20px 14px; }
+.search-studio-others { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:4px; }
+.search-studios > .search-studio-others { margin-top:0; }
+.search-studio-others > span { margin-right:4px; color:var(--text-muted); font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; }
+.search-titles-heading { margin:4px 0 8px; font-size:16px; }
+#autocorrect-banner strong { color:#fff; }
+/* The results page makes grid cards full width; in the studio's sliding row they keep a poster size. */
+#view-results .search-studio .anime-card { flex:0 0 165px; width:165px; }
+@media (max-width: 600px) { #view-results .search-studio .anime-card { flex-basis:128px; width:128px; } }

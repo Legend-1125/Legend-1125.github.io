@@ -861,7 +861,7 @@ function parseRoute(hash = location.hash) {
     if (section === 'anime' && numericId) return { name: 'anime', id: numericId };
     if (section === 'search') {
         const query = (params.get('q') || '').trim();
-        return query ? { name: 'search', query, page, filters: readSearchFilters(params) } : { name: 'not-found' };
+        return query ? { name: 'search', query, page, filters: readSearchFilters(params), from: (params.get('from') || '').trim().slice(0, 100) } : { name: 'not-found' };
     }
     if (section === 'browse' && BROWSE_TARGETS.has(id)) return { name: 'browse', target: id, page };
     if (section === 'studio' && numericId) return { name: 'studio', id: numericId, studioName: params.get('name') || '', page };
@@ -1031,6 +1031,7 @@ function showResultsRoute(route) {
     if (route.name === 'search') {
         searchFilters = route.filters;
         currentSearchQuery = route.query;
+        searchCorrectedFrom = route.from || '';
         currentActiveRowTarget = 'search';
         if (searchInput && document.activeElement !== searchInput) searchInput.value = route.query;
         clearSearchBtn?.classList.toggle('hidden', !route.query);
@@ -1058,6 +1059,7 @@ function resultsRouteHash(page = currentPage) {
             const value = searchFilters[key];
             if (value && !(key === 'order' && value === 'default')) params[param] = value;
         });
+        if (searchCorrectedFrom && page <= 1) params.from = searchCorrectedFrom;
         return routeHash('/search', { ...params, page });
     }
     if (currentActiveRowTarget === 'studio') return studioHash(selectedStudioId, selectedStudioName, page);
@@ -1583,7 +1585,7 @@ function renderSeasonal(params = {}) {
     loadSeasonalPage(1);
 }
 
-async function loadSeasonalPage(page) {
+async function loadSeasonalPage(page, { retried = false } = {}) {
     const grid = document.getElementById('season-grid');
     const more = document.getElementById('season-more-btn');
     if (!grid) return;
@@ -1608,13 +1610,17 @@ async function loadSeasonalPage(page) {
         formats: view.format ? [view.format] : Object.keys(SEASONAL_FORMATS), genre: view.genre || null,
         sort: view.sort === 'popularity' ? ['POPULARITY_DESC'] : [SEASONAL_SORTS[view.sort][1], 'POPULARITY_DESC'], isAdult: adultContentEnabled ? null : false,
     };
+    const cacheKey = `seasonal:v1:${view.season}:${view.year}:${view.format}:${view.genre}:${view.sort}:${adultContentEnabled}:${page}`;
     try {
-        const data = await aniRequest(query, variables, {
-            cacheKey: `seasonal:v1:${view.season}:${view.year}:${view.format}:${view.genre}:${view.sort}:${adultContentEnabled}:${page}`,
-            ttl: 30 * 60 * 1000, priority: 'interactive',
-        });
+        const data = await aniRequest(query, variables, { cacheKey, ttl: 30 * 60 * 1000, priority: 'interactive' });
         if (token !== seasonalToken) return;
         const media = data?.Page?.media || [];
+        if (page === 1 && !media.length) {
+            // An empty season is never worth keeping: AniList sometimes answers with
+            // nothing when it's busy. Forget it, and ask once more before saying so.
+            try { localStorage.removeItem(CACHE_PREFIX + cacheKey); } catch {}
+            if (!retried) { await delay(1500); if (token === seasonalToken) loadSeasonalPage(1, { retried: true }); return; }
+        }
         const known = new Set(seasonalItems.map(item => item.id));
         seasonalItems = seasonalItems.concat(media.filter(item => !known.has(item.id)));
         seasonalHasMore = Boolean(data?.Page?.pageInfo?.hasNextPage);
@@ -1708,7 +1714,8 @@ function drawSeasonal() {
     if (!visible.length) {
         grid.innerHTML = seasonalItems.length
             ? '<div class="empty-state">Everything shown so far is already on your list.</div>'
-            : `<div class="empty-state">No anime found for ${escapeHtml(chartSeasonLabel(seasonalView))}${seasonalView.format || seasonalView.genre ? ' with these filters' : ''}.</div>`;
+            : `<div class="empty-state">No anime found for ${escapeHtml(chartSeasonLabel(seasonalView))}${seasonalView.format || seasonalView.genre ? ' with these filters' : ''}.<span>If that looks wrong, AniList may be busy.</span><button class="inline-retry-btn" type="button">Try again</button></div>`;
+        grid.querySelector('.inline-retry-btn')?.addEventListener('click', () => { seasonalItems = []; loadSeasonalPage(1, { retried: true }); });
         return;
     }
     grid.innerHTML = visible.map(seasonalCardHtml).join('');
@@ -2230,6 +2237,10 @@ async function fetchExpandedGridData() {
         rating: document.getElementById('filter-rating')?.value || '',
         order: document.getElementById('filter-order')?.value || 'default',
     };
+    const firstSearchPage = currentActiveRowTarget === 'search' && currentPage === 1;
+    const searchText = currentSearchQuery;
+    renderSearchStudios(null); renderSearchBanner(null);   // nothing left over from the previous search
+    const studiosRequest = firstSearchPage ? findStudiosWithWorks(searchText, request.signal).catch(() => null) : null;
     try {
         let data;
         if (currentActiveRowTarget === 'trending') data = await getTrending(currentPage, PAGE_SIZE, request);
@@ -2245,7 +2256,17 @@ async function fetchExpandedGridData() {
             syncResultsUrl();
         }
         resultsPageInfo = data.Page.pageInfo;
+        const studioMatch = firstSearchPage ? pickStudioMatch(searchText, await studiosRequest) : null;
+        if (token !== resultsRequestToken) return;
+        renderSearchStudios(studioMatch);
         renderResultsPage(grid, data.Page.media || [], resultsPageInfo);
+        if (firstSearchPage) {
+            const items = data.Page.media || [];
+            if (studioMatch?.strong && !items.length) grid.innerHTML = `<div class="empty-state">No titles contain “${escapeHtml(searchText)}”. ${escapeHtml(studioMatch.strong.name)}'s anime are shown above.</div>`;
+            renderSearchBanner(searchCorrectedFrom ? { corrected: true, from: searchCorrectedFrom, to: searchText } : null);
+            // Few or no results, and not obviously a studio: maybe a spelling mistake.
+            if (!searchCorrectedFrom && !studioMatch?.strong && items.length < 5) suggestSpelling(searchText, token, items.length);
+        }
     } catch (error) {
         if (token !== resultsRequestToken || error.name === 'AbortError') return;
         console.error('Grid error:', error);
@@ -2256,6 +2277,191 @@ async function fetchExpandedGridData() {
         if (token === resultsRequestToken) showLoading(false);
     }
 }
+/* ==========================================
+   SEARCH: STUDIOS AND "DID YOU MEAN"
+   A search also looks for studios. A close match ("mappa" -> MAPPA) gets its own
+   section above the title results with the studio's most popular anime.
+   When a search finds little or nothing, it's compared with popular anime
+   titles, studio names and your own list/history: nothing found -> the
+   corrected search is shown instead (and says so); a few found -> "Did you mean".
+   ========================================== */
+let searchCorrectedFrom = '';
+const SPELL_KEY = 'anizone:spell:v1';
+const SPELL_TTL = 7 * 24 * 60 * 60 * 1000;
+let spellCorpusRequest = null;
+
+function normalizeSearchText(text) {
+    return String(text || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+// Edit distance that counts a swap of two neighbouring letters as one mistake.
+// Stops early once it's clearly more than `max` apart.
+function typoDistance(a, b, max = 3) {
+    if (a === b) return 0;
+    if (Math.abs(a.length - b.length) > max) return max + 1;
+    let prevPrev = null, prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+        const row = [i];
+        let rowMin = i;
+        for (let j = 1; j <= b.length; j++) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            let value = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + cost);
+            if (prevPrev && i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) value = Math.min(value, prevPrev[j - 2] + 1);
+            row.push(value);
+            if (value < rowMin) rowMin = value;
+        }
+        if (rowMin > max) return max + 1;
+        prevPrev = prev; prev = row;
+    }
+    return prev[b.length];
+}
+const typoAllowance = (length) => length <= 3 ? 0 : length <= 5 ? 1 : length <= 9 ? 2 : 3;
+
+async function findStudiosWithWorks(text, signal) {
+    const query = `query ($search: String!) {
+        Page(page: 1, perPage: 6) {
+            studios(search: $search) {
+                id name isAnimationStudio favourites
+                media(sort: POPULARITY_DESC, isMain: true, perPage: 12) { pageInfo { total } nodes { ${FOR_YOU_CARD_FIELDS} } }
+            }
+        }
+    }`;
+    const data = await aniRequest(query, { search: text }, { cacheKey: `search-studios:v1:${normalizeSearchText(text)}`, ttl: 24 * 60 * 60 * 1000, signal, priority: 'interactive' });
+    return data?.Page?.studios || [];
+}
+// The studio this search most likely means (if any), plus other matching studios.
+function pickStudioMatch(text, studios) {
+    if (!studios?.length) return null;
+    const q = normalizeSearchText(text);
+    const scored = studios.map(studio => {
+        const name = normalizeSearchText(studio.name);
+        let closeness = 9;
+        if (name === q) closeness = 0;
+        else if (name.startsWith(`${q} `) || name.replace(/ /g, '') === q.replace(/ /g, '')) closeness = 1;
+        else if (q.length >= 4 && typoDistance(q, name, 2) <= typoAllowance(q.length)) closeness = 2;
+        return { studio, closeness, works: (studio.media?.nodes || []).filter(anime => adultContentEnabled || !anime.isAdult) };
+    }).sort((a, b) => a.closeness - b.closeness || (b.studio.isAnimationStudio - a.studio.isAnimationStudio) || ((b.studio.favourites || 0) - (a.studio.favourites || 0)));
+    const best = scored[0];
+    const strong = best.closeness <= 2 && best.works.length ? best : null;
+    return {
+        strong: strong ? { ...strong.studio, works: strong.works, total: strong.studio.media?.pageInfo?.total || strong.works.length } : null,
+        others: scored.filter(item => item !== strong).map(item => item.studio).slice(0, 5),
+    };
+}
+function renderSearchStudios(match) {
+    const box = document.getElementById('search-studios');
+    const heading = document.getElementById('search-titles-heading');
+    if (!box) return;
+    const others = match?.others || [];
+    if (!match || (!match.strong && !others.length)) { box.classList.add('hidden'); box.innerHTML = ''; heading?.classList.add('hidden'); return; }
+    const chips = others.length ? `<div class="search-studio-others"><span>${match.strong ? 'Other studios' : 'Studios'}</span>${others.map(studio => `<a class="stats-genre-chip" href="${studioHash(studio.id, studio.name)}">${escapeHtml(studio.name)}</a>`).join('')}</div>` : '';
+    if (match.strong) {
+        const studio = match.strong;
+        box.innerHTML = `<section class="search-studio">
+            <div class="search-studio-head">
+                <div><span class="stats-eyebrow">Studio</span><h3>${escapeHtml(studio.name)}</h3><span class="search-studio-meta">${studio.total.toLocaleString()} anime · most popular first</span></div>
+                <a class="see-more-btn" href="${studioHash(studio.id, studio.name)}">See all ${escapeHtml(studio.name)} anime <span>›</span></a>
+            </div>
+            <div class="slider-container"><button class="slider-arrow left-arrow" type="button" aria-label="Scroll left">‹</button><div class="slider-track" id="search-studio-track"></div><button class="slider-arrow right-arrow" type="button" aria-label="Scroll right">›</button></div>
+            ${chips}
+        </section>`;
+        wireSliderArrows(box);
+        renderSliderTrack('search-studio-track', studio.works);
+    } else {
+        box.innerHTML = chips;
+    }
+    box.classList.remove('hidden');
+    if (heading) {
+        heading.textContent = `Titles matching “${currentSearchQuery}”`;
+        heading.classList.toggle('hidden', !match.strong);
+    }
+}
+function renderSearchBanner(info) {
+    const banner = document.getElementById('autocorrect-banner');
+    if (!banner) return;
+    if (!info) { banner.classList.add('hidden'); banner.innerHTML = ''; return; }
+    if (info.corrected) {
+        banner.innerHTML = `No results for “${escapeHtml(info.from)}”. Showing results for <strong>${escapeHtml(info.to)}</strong> instead.`;
+    } else {
+        const target = info.studio ? studioHash(info.studio.id, info.studio.name) : routeHash('/search', { q: info.label });
+        banner.innerHTML = `Did you mean ${info.studio ? 'the studio ' : ''}<a class="autocorrect-link" href="${target}">${escapeHtml(info.label)}</a>?`;
+    }
+    banner.classList.remove('hidden');
+}
+
+// Popular anime titles and studio names, kept on this device for a week.
+function spellingCorpus() {
+    if (spellCorpusRequest) return spellCorpusRequest;
+    spellCorpusRequest = (async () => {
+        try {
+            const saved = JSON.parse(localStorage.getItem(SPELL_KEY) || 'null');
+            if (saved?.titles?.length && Date.now() - saved.savedAt < SPELL_TTL) return saved;
+        } catch {}
+        const page = (n) => `t${n}: Page(page: ${n}, perPage: 50) { media(type: ANIME, sort: POPULARITY_DESC) { title { romaji english } } }`;
+        const [a, b] = await Promise.all([
+            aniRequest(`query { ${page(1)} ${page(2)} }`, {}, { priority: 'background' }),
+            aniRequest(`query { ${page(3)} studios: Page(page: 1, perPage: 50) { studios(sort: FAVOURITES_DESC) { id name } } }`, {}, { priority: 'background' }).catch(() => null),
+        ]);
+        const titles = [];
+        for (const data of [a, b]) for (const key of ['t1', 't2', 't3']) for (const media of data?.[key]?.media || []) titles.push([media.title?.english || '', media.title?.romaji || ''].filter(Boolean));
+        const corpus = { titles, studios: (b?.studios?.studios || []).map(studio => [studio.id, studio.name]), savedAt: Date.now() };
+        try { localStorage.setItem(SPELL_KEY, JSON.stringify(corpus)); } catch {}
+        return corpus;
+    })().catch(error => { spellCorpusRequest = null; throw error; });
+    return spellCorpusRequest;
+}
+function spellingCandidates(corpus) {
+    const out = [];
+    const add = (label, kind, extra = {}) => { const norm = normalizeSearchText(label); if (norm.length >= 2) out.push({ label, norm, kind, ...extra }); };
+    (corpus?.studios || []).forEach(([id, name]) => add(name, 'studio', { studio: { id, name } }));
+    (corpus?.titles || []).forEach(names => names.forEach(name => add(name, 'title')));
+    const local = [];
+    if (typeof MalSync !== 'undefined' && typeof MalSync.listEntries === 'function') MalSync.listEntries().forEach(entry => local.push(entry.titleEn, entry.title));
+    (typeof clickHistory !== 'undefined' ? clickHistory : []).forEach(item => local.push(item.title?.english, item.title?.romaji));
+    Object.values(dashboardPools || {}).flat().forEach(anime => local.push(anime?.title?.english, anime?.title?.romaji));
+    local.filter(Boolean).forEach(name => add(name, 'title'));
+    return out;
+}
+// The most likely intended search, or null. Matches the whole name, the start of a
+// longer name ("jujutsu kaisn" -> Jujutsu Kaisen ...), or one word of it ("naurto").
+function bestSpellingMatch(text, candidates) {
+    const q = normalizeSearchText(text);
+    const allowed = typoAllowance(q.replace(/ /g, '').length);
+    if (!allowed) return null;
+    let best = null;
+    for (const candidate of candidates) {
+        const c = candidate.norm;
+        let distance = typoDistance(q, c, allowed);
+        let suggestion = candidate.label;
+        if (distance > allowed && c.length > q.length) {
+            const prefix = typoDistance(q, c.slice(0, q.length), allowed);
+            if (prefix + 0.25 < distance) distance = prefix + 0.25;
+        }
+        if (distance > allowed && !q.includes(' ')) {
+            for (const word of c.split(' ')) {
+                if (word.length < 4) continue;
+                const d = typoDistance(q, word, allowed) + 0.5;
+                if (d < distance) { distance = d; suggestion = candidate.kind === 'studio' ? candidate.label : word.charAt(0).toUpperCase() + word.slice(1); }
+            }
+        }
+        if (distance === 0 || distance > allowed) continue;
+        if (!best || distance < best.distance) best = { ...candidate, distance, label: suggestion };
+    }
+    return best;
+}
+async function suggestSpelling(text, token, resultCount) {
+    let corpus = null;
+    try { corpus = await spellingCorpus(); } catch { /* local titles only */ }
+    if (token !== resultsRequestToken || currentSearchQuery !== text) return;
+    const match = bestSpellingMatch(text, spellingCandidates(corpus));
+    if (!match || normalizeSearchText(match.label) === normalizeSearchText(text)) return;
+    if (!resultCount) {
+        // Nothing found: show the corrected search straight away (and say so).
+        navigate(routeHash('/search', { q: match.label, from: text }), { replace: true });
+        return;
+    }
+    renderSearchBanner({ label: match.label, studio: match.kind === 'studio' ? match.studio : null });
+}
+
 function renderResultsPage(grid, items, pageInfo) {
     grid.innerHTML = '';
     if (!items.length) grid.innerHTML = '<div class="empty-state">No matching anime found.</div>';
@@ -2864,6 +3070,7 @@ function initApp() {
     loadDashboardRows({ silent: parseRoute().name !== 'home' });
     // Recommendations follow your MyAnimeList list (logging in, list updates, changes).
     if (malSyncHas('subscribe')) { MalSync.subscribe(scheduleForYouRows); scheduleForYouRows(); }
+    setTimeout(() => (window.requestIdleCallback || (fn => setTimeout(fn, 1)))(() => spellingCorpus().catch(() => {})), 15000);
 }
 
 document.addEventListener('DOMContentLoaded', initApp);
