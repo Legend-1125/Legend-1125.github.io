@@ -610,7 +610,7 @@ const MEDIA_DETAIL_FIELDS = `
         edges {
             relationType(version: 2)
             node {
-                id isAdult type format status episodes
+                id idMal isAdult type format status episodes
                 title { romaji english native }
                 synonyms
                 coverImage { medium large extraLarge }
@@ -834,7 +834,7 @@ async function findStudios(search, perPage = 5, signal) {
 
 async function getAnimeDetails(id, { signal, priority = 'interactive' } = {}) {
     const query = `query ($id: Int!) { Media(id: $id, type: ANIME) { ${MEDIA_DETAIL_FIELDS} } }`;
-    return aniRequest(query, { id: Number(id) }, { cacheKey: `detail:v3:${id}`, ttl: CACHE_TTL.details, signal, priority });
+    return aniRequest(query, { id: Number(id) }, { cacheKey: `detail:v4:${id}`, ttl: CACHE_TTL.details, signal, priority });
 }
 
 function initImageLazyLoad() {
@@ -2636,6 +2636,7 @@ function resetDetailView() {
     const spinner = '<div class="spinner"></div>';
     document.getElementById('characters-list').innerHTML = spinner;
     document.getElementById('chrono-timeline').innerHTML = spinner;
+    document.getElementById('timeline-summary')?.classList.add('hidden');
     ['episode-countdown', 'detail-trailer', 'detail-themes', 'manga-continuation', 'detail-staff', 'detail-recommendations']
         .forEach(id => { const box = document.getElementById(id); if (box) box.innerHTML = ''; });
 }
@@ -2660,7 +2661,7 @@ async function showAnimeDetails(animeId) {
         renderCastProfiles(anime.characters?.edges || []);
         appendAnimeToClickHistoryLog(anime);
         if (getDetailPrefs().timeline) renderDetailSection('timeline', anime);
-        else document.getElementById('chrono-timeline').innerHTML = '';
+        else { document.getElementById('chrono-timeline').innerHTML = ''; document.getElementById('timeline-summary')?.classList.add('hidden'); }
     } catch (error) {
         if (token !== detailRequestToken || error.name === 'AbortError') return;
         console.error('Detail error:', error);
@@ -2668,6 +2669,7 @@ async function showAnimeDetails(animeId) {
         document.getElementById('detail-title').textContent = error.message || 'Unable to load anime details.';
         document.getElementById('characters-list').innerHTML = '<div class="empty-state">Cast unavailable.</div>';
         document.getElementById('chrono-timeline').innerHTML = '<div class="empty-state">Timeline unavailable.</div>';
+        document.getElementById('timeline-summary')?.classList.add('hidden');
     } finally {
         if (token === detailRequestToken) showLoading(false);
     }
@@ -2884,7 +2886,7 @@ async function fetchFranchiseTimeline(rootAnime) {
             const query = `query ($ids: [Int]) {
                 Page(page: 1, perPage: 30) {
                     media(id_in: $ids, type: ANIME) {
-                        id isAdult type format status episodes duration
+                        id idMal isAdult type format status episodes duration
                         title { romaji english native }
                         coverImage { medium large extraLarge }
                         startDate { year month day }
@@ -2892,7 +2894,7 @@ async function fetchFranchiseTimeline(rootAnime) {
                             edges {
                                 relationType(version: 2)
                                 node {
-                                    id isAdult type format status episodes duration
+                                    id idMal isAdult type format status episodes duration
                                     title { romaji english native }
                                     synonyms
                                     coverImage { medium large extraLarge }
@@ -2904,7 +2906,7 @@ async function fetchFranchiseTimeline(rootAnime) {
                 }
             }`;
             const data = await aniRequest(query, { ids }, {
-                cacheKey: `main-relations:${ids.slice().sort((a, b) => a - b).join(',')}`,
+                cacheKey: `main-relations:v2:${ids.slice().sort((a, b) => a - b).join(',')}`,
                 ttl: CACHE_TTL.details,
                 signal,
             });
@@ -2924,25 +2926,73 @@ async function fetchFranchiseTimeline(rootAnime) {
         console.error('Timeline error:', error);
         const partial = [...seen.values()].sort((a, b) => dateNumber(a.startDate) - dateNumber(b.startDate));
         if (partial.length > 1) renderTimelineLayout(partial, rootAnime.id);
-        else container.innerHTML = '<div class="empty-state">Could not build the franchise timeline.</div>';
+        else { container.innerHTML = '<div class="empty-state">Could not build the franchise timeline.</div>'; document.getElementById('timeline-summary')?.classList.add('hidden'); }
     }
 }
 function timelineFormatLabel(format) {
     return ({ TV: 'TV / Season', TV_SHORT: 'TV Short / Season', MOVIE: 'Movie', OVA: 'OVA', ONA: 'ONA', SPECIAL: 'Special', MUSIC: 'Music' })[format] || formatFormat(format);
 }
+// Franchise timeline. With MyAnimeList connected, each entry shows where you are with it:
+// the rail dot takes the status colour used across the site, a small label says
+// "Completed" / "Watching 5/12", shows in progress get a thin progress line, and a
+// segmented bar on top sums up the franchise.
+let lastTimeline = null;
+const TIMELINE_STATUS = { watching: 'Watching', completed: 'Completed', on_hold: 'On hold', dropped: 'Dropped', plan_to_watch: 'Planned' };
+function timelineEntry(node) {
+    if (!node?.idMal || typeof malSyncHas !== 'function' || !malSyncHas('entryFor')) return null;
+    return MalSync.entryFor(node.idMal) || null;
+}
+function timelineStatusText(entry, node) {
+    if (entry.rewatching) return 'Rewatching';
+    const label = TIMELINE_STATUS[entry.status] || '';
+    const total = node.episodes || entry.episodes || 0;
+    const watched = Number(entry.watched) || 0;
+    return ['watching', 'on_hold', 'dropped'].includes(entry.status) && total > 1 ? `${label} ${watched}/${total}` : label;
+}
+function renderTimelineSummary(nodes, entries) {
+    const box = document.getElementById('timeline-summary');
+    if (!box) return;
+    if (!entries.some(Boolean)) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+    const finished = entries.filter(entry => entry?.status === 'completed').length;
+    const going = entries.filter(entry => entry && (entry.status === 'watching' || entry.rewatching)).length;
+    const segments = nodes.map((node, i) => {
+        const entry = entries[i];
+        const tip = `${displayTitle(node)}: ${entry ? timelineStatusText(entry, node) : 'Not on your list'}`;
+        return `<span class="tl-seg${entry ? ` mal-status-${entry.status}` : ''}" title="${escapeHtml(tip)}"></span>`;
+    }).join('');
+    box.innerHTML = `<div class="tl-sum-text"><strong>${finished} of ${nodes.length}</strong> finished${going ? ` · ${going} in progress` : ''}</div><div class="tl-sum-bar" aria-hidden="true">${segments}</div>`;
+    box.classList.remove('hidden');
+}
 function renderTimelineLayout(nodes, activeId) {
+    lastTimeline = { nodes, activeId: Number(activeId) };
     const container = document.getElementById('chrono-timeline');
     container.innerHTML = '';
-    if (nodes.length <= 1) { container.innerHTML = '<div class="empty-state">Standalone title — no related anime found.</div>'; return; }
-    nodes.forEach(node => {
+    if (nodes.length <= 1) { renderTimelineSummary([], []); container.innerHTML = '<div class="empty-state">Standalone title — no related anime found.</div>'; return; }
+    const entries = nodes.map(timelineEntry);
+    renderTimelineSummary(nodes, entries);
+    nodes.forEach((node, i) => {
         const current = node.id === Number(activeId);
+        const entry = entries[i];
         const element = document.createElement('div');
-        element.className = `timeline-node${current ? ' current-node' : ''}`;
-        element.innerHTML = `<div class="timeline-dot"></div><div class="timeline-meta-row"><div class="timeline-relation">${escapeHtml(node.relation || 'Related')} · ${escapeHtml(formatDate(node.startDate))}</div><span class="timeline-format-badge">${escapeHtml(timelineFormatLabel(node.format))}</span></div><div class="timeline-title">${escapeHtml(displayTitle(node))}</div>`;
+        element.className = `timeline-node${current ? ' current-node' : ''}${entry ? ` tl-has mal-status-${entry.status}${entry.rewatching ? ' tl-rewatching' : ''}` : ''}`;
+        const total = node.episodes || entry?.episodes || 0;
+        const partway = entry && ['watching', 'on_hold', 'dropped'].includes(entry.status) && total > 0;
+        const percent = partway ? Math.min(100, Math.round(((Number(entry.watched) || 0) / total) * 100)) : 0;
+        element.innerHTML = `<div class="timeline-dot"></div><div class="timeline-meta-row"><div class="timeline-relation">${escapeHtml(node.relation || 'Related')} · ${escapeHtml(formatDate(node.startDate))}</div><span class="timeline-format-badge">${escapeHtml(timelineFormatLabel(node.format))}</span></div><div class="timeline-title">${escapeHtml(displayTitle(node))}</div>`
+            + (entry ? `<div class="tl-status"><i aria-hidden="true"></i>${escapeHtml(timelineStatusText(entry, node))}</div>` : '')
+            + (partway ? `<span class="tl-progress" style="--p:${percent}%" aria-hidden="true"></span>` : '');
         if (!current) element.addEventListener('click', () => viewSingleAnime(node.id));
         container.appendChild(element);
     });
 }
+// Your list changed (logged in, synced, status/episodes updated): redraw the marks.
+document.addEventListener('DOMContentLoaded', () => {
+    if (typeof malSyncHas === 'function' && malSyncHas('subscribe')) MalSync.subscribe(() => {
+        if (!lastTimeline || currentDetailAnime?.id !== lastTimeline.activeId || document.getElementById('view-details')?.classList.contains('hidden')) return;
+        if (!document.querySelector('#chrono-timeline .timeline-node')) return;
+        renderTimelineLayout(lastTimeline.nodes, lastTimeline.activeId);
+    });
+});
 
 async function openStaffPortfolioPanel(personId, personName) {
     const modal = document.getElementById('va-modal');

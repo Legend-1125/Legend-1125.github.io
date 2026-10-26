@@ -2944,3 +2944,28 @@ html, body { overflow-x: clip; }
 .settings-fold .profile-adult-toggle:has(input:checked)::after { background: var(--accent-red) radial-gradient(circle at 23px 50%, #fff 6px, transparent 6.5px); }
 .settings-fold .profile-adult-toggle:has(input:focus-visible) { outline: 2px solid var(--accent-red); outline-offset: 2px; }
 .settings-fold .hide-seen-toggle { margin-top: 0; }
+
+/* ==========================================
+   FRANCHISE TIMELINE: where you are with each entry (MyAnimeList)
+   Same status colours as My List (--mal-status): the rail dot takes the colour,
+   a small label names the status, partly-watched entries get a progress line,
+   and a segmented bar on top sums up the franchise.
+   ========================================== */
+.timeline-summary { margin: -2px 0 14px; }
+.tl-sum-text { margin-bottom: 7px; color: var(--text-muted); font-size: 12px; font-weight: 600; }
+.tl-sum-text strong { color: #fff; font-weight: 800; }
+.tl-sum-bar { display: flex; gap: 3px; height: 8px; }
+.tl-seg { flex: 1 1 0; min-width: 6px; border-radius: 999px; background: rgba(255,255,255,.1); }
+.tl-seg[class*="mal-status-"] { background: var(--mal-status); }
+.tl-seg.mal-status-plan_to_watch { background: transparent; box-shadow: inset 0 0 0 1.5px var(--mal-status); }
+
+.timeline-node.tl-has .timeline-dot { background: var(--mal-status); border-color: var(--bg-black); box-shadow: 0 0 0 3px color-mix(in srgb, var(--mal-status) 22%, transparent); }
+.timeline-node.tl-has.mal-status-plan_to_watch .timeline-dot { background: var(--bg-black); border: 2px solid var(--mal-status); box-shadow: none; }
+.timeline-node.current-node.tl-has .timeline-dot { box-shadow: 0 0 0 3px color-mix(in srgb, var(--mal-status) 30%, transparent), 0 0 10px var(--accent-red); }
+.tl-status { display: inline-flex; align-items: center; gap: 6px; margin-top: 7px; padding: 2px 9px 2px 7px; border-radius: 999px; background: color-mix(in srgb, var(--mal-status) 14%, transparent); color: color-mix(in srgb, var(--mal-status) 55%, #fff); font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tl-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--mal-status); }
+.tl-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; overflow: hidden; border-radius: 0 0 var(--radius-sm) var(--radius-sm); background: rgba(255,255,255,.08); }
+.tl-progress::after { content: ''; position: absolute; inset: 0 auto 0 0; width: var(--p); background: var(--mal-status); border-radius: 0 3px 3px 0; }
+/* The rail sits inside the scroll box so the status dots aren't cut off at the edge. */
+.timeline-container { border-left: 0; padding-left: 30px; background: linear-gradient(rgba(255,255,255,.1), rgba(255,255,255,.1)) no-repeat 7px 0 / 2px 100%; background-attachment: local; }
+.timeline-dot { left: -29px; }
