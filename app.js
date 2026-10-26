@@ -166,6 +166,16 @@ function stripHtml(value) {
     // loads or runs (no image requests, no onerror handlers).
     return new DOMParser().parseFromString(String(value || ''), 'text/html').body.textContent || '';
 }
+// A synopsis without the credits and editors' notes AniList/MAL add to it:
+// "(Source: Kodansha USA)", "[Written by MAL Rewrite]", "Note: episode 2 was streamed...".
+function synopsisText(description) {
+    let text = stripHtml(description).replace(/\s+/g, ' ').trim();
+    text = text.replace(/\s*[(\[]\s*(?:sources?|written by|taken from|from)\s*[:\s][^)\]]*[)\]]/gi, ' ');
+    const note = text.search(/(?:^|\s)(?:notes?|n\.b\.)\s*:/i);
+    if (note > 30) text = text.slice(0, note);   // (a "note:" right at the start is part of the story)
+    text = text.replace(/\s*(?:sources?)\s*:\s*[^.]*\.?\s*$/i, '');
+    return text.replace(/\s+/g, ' ').trim();
+}
 function showLoading(show) { loading?.classList.toggle('hidden', !show); }
 function scrollPageToTop() {
     window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
@@ -1709,7 +1719,7 @@ function seasonalCardHtml(anime) {
     const alt = secondaryTitle(anime);
     const studio = anime.studios?.nodes?.[0]?.name || '';
     const facts = [studio, anime.episodes ? `${anime.episodes} ep${anime.episodes === 1 ? '' : 's'}` : '', anime.duration && anime.format === 'MOVIE' ? `${anime.duration} min` : '', SOURCE_NAMES[anime.source] || ''].filter(Boolean).join(' · ');
-    const synopsis = stripHtml(anime.description) || 'No synopsis yet.';
+    const synopsis = synopsisText(anime.description) || 'No synopsis yet.';
     const popularity = compactCount(anime.popularity);
     return `<article class="season-card${anime.isAdult ? ' adult-card' : ''}" data-anime-id="${anime.id}">
         <a class="season-card-poster" href="${animeHash(anime.id)}" tabindex="-1" aria-hidden="true"><img src="${escapeHtml(imageUrl(anime))}" alt="" loading="lazy" decoding="async"><span class="season-card-format">${escapeHtml(SEASONAL_FORMATS[anime.format] || formatFormat(anime.format))}</span></a>
@@ -1976,7 +1986,7 @@ function renderHeroSlide(index) {
         if (token !== heroRenderToken) return;
         showHeroBackground(picture);
         document.getElementById('hero-title').textContent = displayTitle(anime);
-        document.getElementById('hero-synopsis').textContent = stripHtml(anime.description) || 'No synopsis available.';
+        document.getElementById('hero-synopsis').textContent = synopsisText(anime.description) || 'No synopsis available.';
         document.querySelector('.hero-badge.top-10').textContent = `#${index + 1} Trending`;
         document.querySelector('.hero-badge.new-season').textContent = anime.seasonYear ? `${anime.season || ''} ${anime.seasonYear}`.trim() : formatStatus(anime.status);
         const watchTitle = anime.title?.english || anime.title?.romaji || '';
@@ -2605,7 +2615,7 @@ function renderAnimeDetails(anime) {
     const alternate = secondaryTitle(anime);
     document.getElementById('detail-title').innerHTML = `${escapeHtml(primary)}${alternate ? `<span class="detail-alt-title">${escapeHtml(alternate)}</span>` : ''}`;
     document.getElementById('detail-title').classList.toggle('long-title', primary.length > 45);
-    setSynopsis(stripHtml(anime.description) || 'No synopsis available.');
+    setSynopsis(synopsisText(anime.description) || 'No synopsis available.');
     const adultWarning = document.getElementById('detail-adult-warning');
     if (adultWarning) adultWarning.classList.toggle('hidden', !anime.isAdult);
     const aniBadge = document.getElementById('badge-score');
@@ -3072,16 +3082,51 @@ async function fetchScheduleForDate(date) {
         list.innerHTML = `<div class="schedule-empty"><span>${escapeHtml(error.message || 'Could not load schedule.')}</span></div>`;
     }
 }
+// Shows you're watching on MyAnimeList come first, in their own group.
+let lastScheduleItems = null;
+function watchingEntryFor(anime) {
+    if (!anime?.idMal || typeof malSyncHas !== 'function' || !malSyncHas('entryFor')) return null;
+    const entry = MalSync.entryFor(anime.idMal);
+    return entry && (entry.status === 'watching' || entry.rewatching) ? entry : null;
+}
+function scheduleRow(entry, now, mine) {
+    const anime = entry.media;
+    const time = new Date(entry.airingAt * 1000);
+    const aired = time.getTime() <= now;
+    const title = displayTitle(anime);
+    const clock = time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const item = document.createElement('a');
+    item.className = `schedule-item${aired ? ' aired' : ' upcoming'}${mine ? ' mine' : ''}`;
+    item.href = animeHash(anime.id);
+    // How far you've got, so you can see if you're behind.
+    const seen = mine ? `<span class="sched-seen">${mine.watched ? `you've seen ${mine.watched}` : 'not started'}</span>` : '';
+    // Grey time = already aired; coloured time = still to come.
+    item.innerHTML = `<time class="sched-time" datetime="${time.toISOString()}" title="${aired ? 'Aired' : 'Airs'} at ${clock}" aria-label="${aired ? 'Aired' : 'Airs'} at ${clock}">${clock}</time>`
+        + `<img class="sched-poster" src="${escapeHtml(imageUrl(anime))}" alt="" loading="lazy">`
+        + `<div class="sched-info"><div class="sched-anime-title">${mine ? '<i class="sched-mine-dot" aria-label="On your Watching list"></i>' : ''}${escapeHtml(title)}</div>`
+        + `<div class="sched-meta"><span class="sched-ep">Episode ${entry.episode}${anime.episodes ? ` of ${anime.episodes}` : ''}</span>${seen}`
+        + `${anime.genres?.length ? `<span class="sched-genres">${escapeHtml(anime.genres.slice(0, 2).join(' · '))}</span>` : ''}</div></div>`
+        + `${anime.averageScore ? `<div class="sched-score" title="AniList score (out of 100)">★ ${Math.round(anime.averageScore)}</div>` : ''}`;
+    return { item, aired };
+}
 function renderScheduleList(items) {
+    lastScheduleItems = items;
     const list = document.getElementById('schedule-list');
     list.innerHTML = '';
     if (!items.length) { list.innerHTML = '<div class="schedule-empty"><span>No episodes scheduled.</span></div>'; return; }
     const now = Date.now();
+    const sorted = [...items].sort((a, b) => a.airingAt - b.airingAt);
+    const mine = sorted.filter(entry => watchingEntryFor(entry.media));
+    const rest = sorted.filter(entry => !watchingEntryFor(entry.media));
+    const heading = (text) => { const h = document.createElement('h3'); h.className = 'schedule-group'; h.textContent = text; list.appendChild(h); };
+    if (mine.length) {
+        heading("You're watching");
+        mine.forEach(entry => list.appendChild(scheduleRow(entry, now, watchingEntryFor(entry.media)).item));
+        if (rest.length) heading('All shows');
+    }
     let sawAired = false, nowMarked = false;
-    items.sort((a, b) => a.airingAt - b.airingAt).forEach(entry => {
-        const anime = entry.media;
-        const time = new Date(entry.airingAt * 1000);
-        const aired = time.getTime() <= now;
+    rest.forEach(entry => {
+        const { item, aired } = scheduleRow(entry, now, null);
         // One "Now" line between what has aired and what's still to come (today only).
         if (aired) sawAired = true;
         else if (sawAired && !nowMarked) {
@@ -3091,21 +3136,15 @@ function renderScheduleList(items) {
             line.innerHTML = '<span>Now</span>';
             list.appendChild(line);
         }
-        const title = displayTitle(anime);
-        const clock = time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-        const item = document.createElement('a');
-        item.className = `schedule-item${aired ? ' aired' : ' upcoming'}`;
-        item.href = animeHash(anime.id);
-        // Grey time = already aired; coloured time = still to come.
-        item.innerHTML = `<time class="sched-time" datetime="${time.toISOString()}" title="${aired ? 'Aired' : 'Airs'} at ${clock}" aria-label="${aired ? 'Aired' : 'Airs'} at ${clock}">${clock}</time>`
-            + `<img class="sched-poster" src="${escapeHtml(imageUrl(anime))}" alt="" loading="lazy">`
-            + `<div class="sched-info"><div class="sched-anime-title">${escapeHtml(title)}</div>`
-            + `<div class="sched-meta"><span class="sched-ep">Episode ${entry.episode}${anime.episodes ? ` of ${anime.episodes}` : ''}</span>`
-            + `${anime.genres?.length ? `<span class="sched-genres">${escapeHtml(anime.genres.slice(0, 2).join(' · '))}</span>` : ''}</div></div>`
-            + `${anime.averageScore ? `<div class="sched-score" title="AniList score (out of 100)">★ ${Math.round(anime.averageScore)}</div>` : ''}`;
         list.appendChild(item);
     });
 }
+// When your MyAnimeList list loads or changes, re-sort the schedule on screen.
+document.addEventListener('DOMContentLoaded', () => {
+    if (typeof malSyncHas === 'function' && malSyncHas('subscribe')) MalSync.subscribe(() => {
+        if (lastScheduleItems && !document.getElementById('view-schedule')?.classList.contains('hidden')) renderScheduleList(lastScheduleItems);
+    });
+});
 
 function initApp() {
     initNavigation();
