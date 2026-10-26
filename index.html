@@ -8,7 +8,7 @@
 <link href="https://fonts.googleapis.com" rel="preconnect"/>
 <link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;display=swap" rel="stylesheet"/> <link href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2214%22%20fill%3D%22%230f0f0f%22%2F%3E%3Cpath%20d%3D%22M5%2032C13%2018%2022%2012%2032%2012s19%206%2027%2020c-8%2014-17%2020-27%2020S13%2046%205%2032Z%22%20fill%3D%22%23211530%22%20stroke%3D%22%238B5CF6%22%20stroke-width%3D%224%22%2F%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2232%22%20r%3D%2213%22%20fill%3D%22%23A78BFA%22%2F%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2232%22%20r%3D%228%22%20fill%3D%22%230f0f0f%22%2F%3E%3Cpath%20d%3D%22M25%2026h15L25%2038h15%22%20fill%3D%22none%22%20stroke%3D%22%238B5CF6%22%20stroke-width%3D%224%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3Ccircle%20cx%3D%2237%22%20cy%3D%2226%22%20r%3D%222.5%22%20fill%3D%22white%22%2F%3E%3C%2Fsvg%3E" rel="icon" type="image/svg+xml"/>
-<link href="styles.css" rel="stylesheet"/>
+<link href="styles.css?v=20261025b" rel="stylesheet"/>
 </head>
 <body>
 <!-- ELEGANT LOADING SCREEN -->
@@ -62,36 +62,43 @@
 <div class="dropdown-panel hidden" id="search-suggestions"></div>
 </div>
 <div class="api-preferences"><select aria-label="Title language" class="nav-select" id="title-language-select"><option value="english">English</option><option value="romaji">Romaji</option></select></div><div class="theme-menu-wrap" id="theme-menu-wrap">
-<button class="theme-avatar-button" id="theme-menu-btn" type="button" aria-label="Choose anime theme" aria-expanded="false">
+<button class="theme-avatar-button" id="theme-menu-btn" type="button" aria-label="Settings" title="Settings" aria-expanded="false">
 <img alt="Current theme" id="theme-avatar-image"/>
 </button>
 <div class="theme-menu-panel hidden" id="theme-menu-panel" role="menu">
-<div class="theme-menu-title">Profile Settings</div>
-<div class="settings-section">
-<div class="settings-label">Color theme</div>
+<div class="theme-menu-title">Settings</div>
+<div class="settings-section settings-theme">
+<div class="settings-label">Color theme <span class="settings-sum" id="theme-current"></span></div>
 <div id="theme-options" class="theme-options theme-options-menu"></div>
 </div>
-<div class="settings-section adult-settings">
-<div class="settings-label">Content settings</div>
+<details class="settings-section settings-fold adult-settings" data-fold="content">
+<summary class="settings-label">Content <span class="settings-sum" id="content-sum"></span></summary>
+<div class="settings-fold-body">
 <label class="adult-toggle profile-adult-toggle" title="Show adult anime">
 <input id="adult-content-toggle" type="checkbox"/>
-<span>Enable 18+ content</span>
+<span>18+ content</span>
 </label>
-<div class="settings-hint">Off by default. Your choice is saved on this device.</div>
+<label class="adult-toggle profile-adult-toggle hide-seen-toggle" title="Leave out shows you've started or finished on MyAnimeList">
+<input id="hide-seen-toggle" type="checkbox"/>
+<span>Hide shows I've seen</span>
+</label>
+<div class="settings-hint" id="hide-seen-hint">Leaves shows you've watched, finished, paused or dropped out of Top Rated, Discover and recommendations. Trending still shows everything.</div>
 </div>
-<div class="settings-section mal-settings">
-<div class="settings-label">MyAnimeList</div>
-<div id="mal-settings"></div>
-</div>
-<div class="settings-section website-settings">
-<div class="settings-label">Watch website</div>
+</details>
+<details class="settings-section settings-fold mal-settings" data-fold="mal">
+<summary class="settings-label">MyAnimeList <span class="settings-sum" id="mal-sum"></span></summary>
+<div class="settings-fold-body"><div id="mal-settings"></div></div>
+</details>
+<details class="settings-section settings-fold website-settings" data-fold="watch">
+<summary class="settings-label">Watch website <span class="settings-sum" id="watch-sum"></span></summary>
+<div class="settings-fold-body">
 <div id="watch-site-options" class="watch-site-options"></div>
 <button class="settings-add-btn" id="add-watch-site-btn" type="button">+ Save website</button>
 <a class="github-settings-link" href="https://github.com/Legend-1125/Legend-1125.github.io" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub repository" title="GitHub">
 <svg aria-hidden="true" viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M12 .7a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2.02c-3.22.7-3.9-1.37-3.9-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.71 1.26 3.37.96.1-.75.4-1.26.73-1.55-2.57-.29-5.27-1.29-5.27-5.73 0-1.27.45-2.3 1.19-3.11-.12-.29-.52-1.47.11-3.07 0 0 .97-.31 3.16 1.19a10.9 10.9 0 0 1 5.76 0c2.19-1.5 3.16-1.19 3.16-1.19.63 1.6.23 2.78.11 3.07.74.81 1.19 1.84 1.19 3.11 0 4.45-2.71 5.43-5.29 5.72.42.36.79 1.07.79 2.16v3.2c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/></svg>
 </a>
 </div>
-<div class="settings-hint data-credits">Data from AniList, MyAnimeList, Jikan and Kitsu. Banner images from TMDB: this site uses the TMDB API but is not endorsed or certified by TMDB.</div>
+</details>
 </div>
 </div>
 </div>
@@ -452,7 +459,7 @@
 <div class="modal-body" id="va-roles-container"></div>
 </div>
 </div>
-<script src="app.js"></script>
+<script src="app.js?v=20261025b"></script>
 <div class="site-dialog-overlay hidden" id="site-dialog" role="dialog" aria-modal="true" aria-labelledby="site-dialog-title">
 <div class="site-dialog-card">
 <button class="site-dialog-close" id="site-dialog-close" type="button" aria-label="Close">×</button>
@@ -466,6 +473,6 @@
 <div class="site-dialog-actions"><button class="btn-secondary hidden" id="site-dialog-cancel" type="button">Cancel</button><button class="btn-primary" id="site-dialog-confirm" type="button">OK</button></div>
 </div>
 </div>
-<script src="mal.js"></script>
+<script src="mal.js?v=20261025b"></script>
 </body>
 </html>

@@ -589,7 +589,7 @@ const MEDIA_DETAIL_FIELDS = `
     siteUrl source countryOfOrigin hashtag
     trailer { id site thumbnail }
     externalLinks { id url site type language color icon notes isDisabled }
-    recommendations(sort: RATING_DESC, perPage: 12) { nodes { rating mediaRecommendation { id idMal isAdult title { romaji english native } coverImage { medium large extraLarge } averageScore format status episodes } } }
+    recommendations(sort: RATING_DESC, perPage: 25) { nodes { rating mediaRecommendation { id idMal isAdult title { romaji english native } coverImage { medium large extraLarge } averageScore format status episodes } } }
     staff(sort: RELEVANCE, perPage: 12) { edges { role node { id name { full native } image { large medium } primaryOccupations } } }
     rankings { rank type format year season allTime context }
     synonyms
@@ -630,6 +630,42 @@ function mediaPageQuery(extraVariables = '', extraArguments = '') {
 }
 
 function adultArgument() { return adultContentEnabled ? '' : ', isAdult: false'; }
+
+/* "Hide shows I've seen" (Settings > Content settings).
+   Anything on your MyAnimeList list that you've started (watching, completed, on hold,
+   dropped) is left out of Top Rated, Discover and recommendations. Trending, search,
+   the seasonal chart and the schedule still show everything. AniList leaves them out
+   of each page (so pages stay full); the same check runs again in the page as a backstop. */
+const HIDE_SEEN_KEY = 'anizone:hide-seen:v1';
+const SEEN_STATUSES = new Set(['watching', 'completed', 'on_hold', 'dropped']);
+let hideSeenEnabled = (() => { try { return localStorage.getItem(HIDE_SEEN_KEY) === 'true'; } catch { return false; } })();
+let seenFilterOnServer = true;   // switched off if AniList ever rejects the list of IDs
+let lastSeenKey = '';
+const isSeenEntry = entry => Boolean(entry) && (SEEN_STATUSES.has(entry.status) || Boolean(entry.rewatching));
+function seenMalIds() {
+    if (!hideSeenEnabled || typeof MalSync === 'undefined' || typeof MalSync.listEntries !== 'function') return [];
+    return [...new Set(MalSync.listEntries().filter(isSeenEntry).map(entry => Number(entry.id)).filter(Boolean))].sort((a, b) => a - b);
+}
+function seenIdsKey(ids) {
+    if (!ids.length) return '';
+    let hash = 5381;
+    for (const id of ids) hash = ((hash * 33) ^ id) >>> 0;
+    return `${ids.length}-${hash.toString(36)}`;
+}
+// The IDs to send to AniList (empty when the setting is off or AniList can't take them).
+function seenFilterIds() { return seenFilterOnServer ? seenMalIds() : []; }
+function hasSeen(anime) {
+    if (!hideSeenEnabled || !anime?.idMal || typeof MalSync === 'undefined' || typeof MalSync.entryFor !== 'function') return false;
+    return isSeenEntry(MalSync.entryFor(anime.idMal));
+}
+function withoutSeen(list) { return hideSeenEnabled && Array.isArray(list) ? list.filter(anime => !hasSeen(anime)) : list; }
+// AniList said no to idMal_not_in: stop sending it and rely on the in-page check.
+function dropServerSeenFilter(error) {
+    if (!seenFilterOnServer || !hideSeenEnabled || !(error instanceof AniListError) || error.status !== 400) return false;
+    seenFilterOnServer = false;
+    console.warn('AniList rejected the seen-shows filter; filtering in the page instead.');
+    return true;
+}
 function formatVariable(value) {
     const map = { tv: 'TV', movie: 'MOVIE', ova: 'OVA', ona: 'ONA', special: 'SPECIAL' };
     return map[value] || null;
@@ -644,10 +680,12 @@ async function getTrending(page = 1, perPage = PAGE_SIZE, { signal, priority = '
     return aniRequest(query, { page, perPage }, { cacheKey: `trending:${adultContentEnabled}:${page}:${perPage}`, ttl: CACHE_TTL.trending, signal, priority });
 }
 async function getTopRated(page = 1, perPage = PAGE_SIZE, { signal, priority = 'interactive' } = {}) {
-    const query = mediaPageQuery('', `, sort: SCORE_DESC${adultArgument()}`);
-    return aniRequest(query, { page, perPage }, { cacheKey: `top:${adultContentEnabled}:${page}:${perPage}`, ttl: CACHE_TTL.top, signal, priority });
+    const seen = seenFilterIds();
+    const query = mediaPageQuery(seen.length ? ', $seen: [Int]' : '', `, sort: SCORE_DESC${seen.length ? ', idMal_not_in: $seen' : ''}${adultArgument()}`);
+    const variables = seen.length ? { page, perPage, seen } : { page, perPage };
+    return aniRequest(query, variables, { cacheKey: `top:${adultContentEnabled}:${page}:${perPage}${seen.length ? `:seen-${seenIdsKey(seen)}` : ''}`, ttl: CACHE_TTL.top, signal, priority });
 }
-function buildMediaPageRequest({ page = 1, perPage = PAGE_SIZE, filters = {}, sort = null, cachePrefix = 'media', ttl = CACHE_TTL.search, signal, priority = 'normal' } = {}) {
+function buildMediaPageRequest({ page = 1, perPage = PAGE_SIZE, filters = {}, sort = null, cachePrefix = 'media', ttl = CACHE_TTL.search, signal, priority = 'normal', excludeMal = [] } = {}) {
     const variableDefs = ['$page: Int!', '$perPage: Int!'];
     const mediaArgs = ['type: ANIME'];
     const variables = { page, perPage };
@@ -677,6 +715,7 @@ function buildMediaPageRequest({ page = 1, perPage = PAGE_SIZE, filters = {}, so
     else if (filters.adultMode === 'regular') adultValue = false;
     else if (filters.adultMode === 'adult') adultValue = true;
     addVariable('isAdult', 'Boolean', adultValue);
+    if (excludeMal.length) addVariable('seen', '[Int]', excludeMal, 'idMal_not_in');
 
     if (sort) {
         variableDefs.push('$sort: [MediaSort]');
@@ -690,7 +729,9 @@ function buildMediaPageRequest({ page = 1, perPage = PAGE_SIZE, filters = {}, so
             media(${mediaArgs.join(', ')}) { ${MEDIA_CARD_FIELDS} }
         }
     }`;
-    const cacheKey = `${cachePrefix}:${adultContentEnabled}:${JSON.stringify(variables)}`;
+    // The list of seen IDs can be long: the cache key holds a short fingerprint of it instead.
+    const keyVariables = excludeMal.length ? { ...variables, seen: seenIdsKey(excludeMal) } : variables;
+    const cacheKey = `${cachePrefix}:${adultContentEnabled}:${JSON.stringify(keyVariables)}`;
     return aniRequest(query, variables, { cacheKey, ttl, signal, priority });
 }
 
@@ -708,6 +749,7 @@ async function getDiscover(page = 1, perPage = PAGE_SIZE, { signal, priority = '
             adultMode: selectedDiscoverAdult,
         },
         sort: 'POPULARITY_DESC',
+        excludeMal: seenFilterIds(),
         cachePrefix: 'discover',
         ttl: CACHE_TTL.discover,
         signal,
@@ -792,7 +834,7 @@ async function findStudios(search, perPage = 5, signal) {
 
 async function getAnimeDetails(id, { signal, priority = 'interactive' } = {}) {
     const query = `query ($id: Int!) { Media(id: $id, type: ANIME) { ${MEDIA_DETAIL_FIELDS} } }`;
-    return aniRequest(query, { id: Number(id) }, { cacheKey: `detail:${id}`, ttl: CACHE_TTL.details, signal, priority });
+    return aniRequest(query, { id: Number(id) }, { cacheKey: `detail:v2:${id}`, ttl: CACHE_TTL.details, signal, priority });
 }
 
 function initImageLazyLoad() {
@@ -1151,6 +1193,7 @@ function initPreferences() {
     adultToggle?.addEventListener('change', event => {
         adultContentEnabled = event.target.checked;
         localStorage.setItem('anizoneAdultEnabled', String(adultContentEnabled));
+        updateContentSummary();
         if (adultContentEnabled && selectedDiscoverAdult === 'regular') selectedDiscoverAdult = 'both';
         if (!adultContentEnabled) selectedDiscoverAdult = 'regular';
         localStorage.setItem('anizoneDiscoverAdultMode', selectedDiscoverAdult);
@@ -1174,6 +1217,17 @@ function initPreferences() {
         window.MalSync?.refreshViews();
         scheduleForYouRows();
     });
+    const hideSeenToggle = document.getElementById('hide-seen-toggle');
+    if (hideSeenToggle) hideSeenToggle.checked = hideSeenEnabled;
+    hideSeenToggle?.addEventListener('change', event => {
+        hideSeenEnabled = event.target.checked;
+        try { localStorage.setItem(HIDE_SEEN_KEY, String(hideSeenEnabled)); } catch { /* still applies for this visit */ }
+        updateHideSeenHint();
+        updateContentSummary();
+        refreshForHideSeen();
+    });
+    updateHideSeenHint();
+    updateContentSummary();
     languageSelect?.addEventListener('change', event => {
         titleLanguage = event.target.value;
         localStorage.setItem('anizoneTitleLanguage', titleLanguage);
@@ -1285,7 +1339,7 @@ async function fetchSearchSuggestions(queryText) {
             const row = document.createElement('div');
             row.className = 'suggestion-item';
             const alt = secondaryTitle(item);
-            row.innerHTML = `<span><strong>${escapeHtml(displayTitle(item))}</strong>${alt ? `<small>${escapeHtml(alt)}</small>` : ''}</span><span class="sug-score"${item.averageScore ? ' title="AniList score (out of 100)"' : ''}>${item.averageScore ? `★ ${Math.round(item.averageScore)}` : 'N/A'}</span>`;
+            row.innerHTML = `<span><strong>${escapeHtml(displayTitle(item))}</strong>${alt ? `<small>${escapeHtml(alt)}</small>` : ''}</span><span class="sug-score"${item.averageScore ? ' title="AniList score"' : ''}>${item.averageScore ? `${Math.round(item.averageScore)}%` : '–'}</span>`;
             row.addEventListener('click', () => { suggestionsDropdown.classList.add('hidden'); viewSingleAnime(item.id); });
             suggestionsDropdown.appendChild(row);
         });
@@ -1318,16 +1372,27 @@ async function getDashboardBundle({ priority = 'interactive' } = {}) {
         addDiscover('tag', 'String', selectedDiscoverGenre);
         addDiscover('minimumTagRank', 'Int', TAG_MIN_RANK);
     }
-    const query = `query ($perPage: Int!${discoverDefs.join('')}) {
+    // Trending always shows everything; Top Rated and Discover can leave out shows you've seen.
+    const seen = seenFilterIds();
+    if (seen.length) variables.seen = seen;
+    lastSeenKey = seenIdsKey(seenMalIds());
+    const seenDef = seen.length ? ', $seen: [Int]' : '';
+    const seenArg = seen.length ? ', idMal_not_in: $seen' : '';
+    const query = `query ($perPage: Int!${discoverDefs.join('')}${seenDef}) {
         trending: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: TRENDING_DESC${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
-        top: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: SCORE_DESC${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
-        discover: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: POPULARITY_DESC${discoverArgs.join('')}${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
+        top: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: SCORE_DESC${seenArg}${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
+        discover: Page(page: 1, perPage: $perPage) { media(type: ANIME, sort: POPULARITY_DESC${discoverArgs.join('')}${seenArg}${adultArgument()}) { ${MEDIA_CARD_FIELDS} } }
     }`;
-    return aniRequest(query, variables, {
-        cacheKey: `dashboard:v2:${adultContentEnabled}:${selectedDiscoverSeason}:${selectedDiscoverYear}:${selectedDiscoverGenre}`,
-        ttl: CACHE_TTL.trending,
-        priority,
-    });
+    try {
+        return await aniRequest(query, variables, {
+            cacheKey: `dashboard:v2:${adultContentEnabled}:${selectedDiscoverSeason}:${selectedDiscoverYear}:${selectedDiscoverGenre}${seen.length ? `:seen-${seenIdsKey(seen)}` : ''}`,
+            ttl: CACHE_TTL.trending,
+            priority,
+        });
+    } catch (error) {
+        if (seen.length && dropServerSeenFilter(error)) return getDashboardBundle({ priority });
+        throw error;
+    }
 }
 
 async function loadDashboardRows({ silent = false } = {}) {
@@ -1356,9 +1421,11 @@ function renderRowError(trackId, error, retry) {
     track.innerHTML = `<div class="empty-state api-error">Unable to load this section.<button class="inline-retry-btn">Retry</button></div>`;
     track.querySelector('.inline-retry-btn')?.addEventListener('click', retry);
 }
+const SEEN_FILTERED_ROWS = new Set(['row-top', 'row-discover', 'row-for-you']);
 function renderSliderTrack(trackId, dataset) {
     const track = document.getElementById(trackId);
     if (!track) return;
+    if (SEEN_FILTERED_ROWS.has(trackId)) dataset = withoutSeen(dataset);
     track.innerHTML = '';
     if (!dataset?.length) {
         track.innerHTML = '<div class="empty-state">No matching anime found.</div>';
@@ -1730,7 +1797,7 @@ function seasonalCardHtml(anime) {
             ${anime.genres?.length ? `<div class="season-card-genres">${anime.genres.slice(0, 4).map(g => `<span>${escapeHtml(g)}</span>`).join('')}</div>` : ''}
             <p class="season-card-synopsis">${escapeHtml(synopsis)}</p>
             <div class="season-card-foot">
-                <span class="season-card-stats">${anime.averageScore ? `<b>★ ${anime.averageScore}</b>` : '<b class="muted">No score yet</b>'}${popularity ? `<span title="${escapeHtml(`${anime.popularity.toLocaleString()} AniList users have it on their list`)}">${popularity} members</span>` : ''}</span>
+                <span class="season-card-stats">${anime.averageScore ? `<b title="AniList score">${anime.averageScore}%</b>` : '<b class="muted">No score yet</b>'}${popularity ? `<span title="${escapeHtml(`${anime.popularity.toLocaleString()} AniList users have it on their list`)}">${popularity} members</span>` : ''}</span>
                 <span class="season-card-action" data-action-for="${anime.id}">${seasonalActionHtml(anime)}</span>
             </div>
         </div>
@@ -2296,7 +2363,8 @@ async function fetchExpandedGridData() {
         const studioMatch = firstSearchPage ? pickStudioMatch(searchText, await studiosRequest) : null;
         if (token !== resultsRequestToken) return;
         renderSearchStudios(studioMatch);
-        renderResultsPage(grid, data.Page.media || [], resultsPageInfo);
+        const pageItems = data.Page.media || [];
+        renderResultsPage(grid, ['top', 'discover'].includes(currentActiveRowTarget) ? withoutSeen(pageItems) : pageItems, resultsPageInfo);
         if (firstSearchPage) {
             const items = data.Page.media || [];
             if (studioMatch?.strong && !items.length) grid.innerHTML = `<div class="empty-state">No titles contain “${escapeHtml(searchText)}”. ${escapeHtml(studioMatch.strong.name)}'s anime are shown above.</div>`;
@@ -2306,6 +2374,7 @@ async function fetchExpandedGridData() {
         }
     } catch (error) {
         if (token !== resultsRequestToken || error.name === 'AbortError') return;
+        if (['top', 'discover'].includes(currentActiveRowTarget) && dropServerSeenFilter(error)) { showLoading(false); fetchExpandedGridData(); return; }
         console.error('Grid error:', error);
         grid.innerHTML = `<div class="empty-state api-error">${escapeHtml(error.message || 'Unable to load results.')}<button id="grid-retry-btn" class="inline-retry-btn">Retry</button></div>`;
         document.getElementById('grid-retry-btn')?.addEventListener('click', fetchExpandedGridData);
@@ -2619,13 +2688,13 @@ function renderAnimeDetails(anime) {
     const adultWarning = document.getElementById('detail-adult-warning');
     if (adultWarning) adultWarning.classList.toggle('hidden', !anime.isAdult);
     const aniBadge = document.getElementById('badge-score');
-    aniBadge.textContent = anime.averageScore ? `★ AniList ${Math.round(anime.averageScore)}` : 'AniList';
+    aniBadge.innerHTML = anime.averageScore ? scoreBadgeHtml('AniList', `${Math.round(anime.averageScore)}%`) : scoreBadgeHtml('AniList', '');
     aniBadge.href = anime.siteUrl || `https://anilist.co/anime/${Number(anime.id)}`;
-    aniBadge.setAttribute('aria-label', `${aniBadge.textContent}. Open on AniList`);
+    aniBadge.setAttribute('aria-label', `AniList score ${anime.averageScore ? `${Math.round(anime.averageScore)}%` : 'not available'}. Open on AniList`);
     const malBadge = document.getElementById('badge-mal-score');
     if (malBadge) {
         if (anime.idMal) malBadge.href = `https://myanimelist.net/anime/${Number(anime.idMal)}`; else malBadge.removeAttribute('href');
-        malBadge.textContent = anime.idMal ? 'MAL …' : 'MAL N/A';
+        malBadge.innerHTML = scoreBadgeHtml('MAL', anime.idMal ? '…' : 'N/A');
         malBadge.title = anime.idMal ? 'Loading MyAnimeList score…' : '';
         malBadge.classList.toggle('hidden', !anime.idMal);
     }
@@ -2641,17 +2710,21 @@ function renderAnimeDetails(anime) {
     buildStreamingLinks(anime);
 }
 
+// Score badges: the site's name as a quiet label, then the number. No star icons.
+function scoreBadgeHtml(source, value) {
+    return `<span class="score-src">${escapeHtml(source)}</span>${value ? ` <b class="score-num">${escapeHtml(value)}</b>` : ''}`;
+}
 async function loadMalScoreIntoDetails(anime) {
     const badge = document.getElementById('badge-mal-score');
     if (!badge || !anime?.idMal) return;
     try {
         const score = await fetchMalScore(anime.idMal, detailSignal());
         if (!isCurrentDetail(anime)) return;
-        badge.textContent = score != null ? `★ MAL ${Number(score).toFixed(2)}` : 'MAL N/A';
+        badge.innerHTML = scoreBadgeHtml('MAL', score != null ? Number(score).toFixed(2) : 'N/A');
         badge.title = score != null ? 'MyAnimeList score' : 'MyAnimeList has no score for this title yet.';
     } catch (error) {
         if (error.name === 'AbortError' || !isCurrentDetail(anime)) return;
-        badge.textContent = 'MAL —';
+        badge.innerHTML = scoreBadgeHtml('MAL', '—');
         badge.title = 'MyAnimeList scores are temporarily unavailable. Try again in a minute.';
     }
 }
@@ -3106,8 +3179,39 @@ function scheduleRow(entry, now, mine) {
         + `<div class="sched-info"><div class="sched-anime-title">${mine ? '<i class="sched-mine-dot" aria-label="On your Watching list"></i>' : ''}${escapeHtml(title)}</div>`
         + `<div class="sched-meta"><span class="sched-ep">Episode ${entry.episode}${anime.episodes ? ` of ${anime.episodes}` : ''}</span>${seen}`
         + `${anime.genres?.length ? `<span class="sched-genres">${escapeHtml(anime.genres.slice(0, 2).join(' · '))}</span>` : ''}</div></div>`
-        + `${anime.averageScore ? `<div class="sched-score" title="AniList score (out of 100)">★ ${Math.round(anime.averageScore)}</div>` : ''}`;
+        + scheduleScores(anime, mine);
     return { item, aired };
+}
+// AniList and MyAnimeList scores, stacked on the right. MAL fills in after the list draws.
+function scheduleScores(anime, mine) {
+    const al = anime.averageScore ? `<span class="sched-score-row" title="AniList score"><span class="score-src">AniList</span><b>${Math.round(anime.averageScore)}%</b></span>` : '';
+    let mal = '';
+    if (anime.idMal) {
+        const known = mine?.mean || getCachedMalScore(anime.idMal);
+        mal = `<span class="sched-score-row" title="MyAnimeList score"${known ? '' : ` data-mal-score="${Number(anime.idMal)}"`}><span class="score-src">MAL</span><b>${known ? Number(known).toFixed(2) : '…'}</b></span>`;
+    }
+    return al || mal ? `<div class="sched-score">${al}${mal}</div>` : '';
+}
+let scheduleScoreToken = 0;
+async function fillScheduleMalScores(list) {
+    const token = ++scheduleScoreToken;
+    const pending = [...list.querySelectorAll('[data-mal-score]')];
+    const next = async () => {
+        while (pending.length && token === scheduleScoreToken) {
+            const row = pending.shift();
+            const value = row.querySelector('b');
+            try {
+                const score = await fetchMalScore(Number(row.dataset.malScore));
+                value.textContent = score != null ? Number(score).toFixed(2) : '–';
+                if (score == null) row.title = 'MyAnimeList has no score for this yet';
+            } catch {
+                value.textContent = '–';
+                row.title = 'MyAnimeList score unavailable right now';
+            }
+            row.removeAttribute('data-mal-score');
+        }
+    };
+    await Promise.all([next(), next(), next(), next()]);   // a few at a time
 }
 function renderScheduleList(items) {
     lastScheduleItems = items;
@@ -3138,7 +3242,29 @@ function renderScheduleList(items) {
         }
         list.appendChild(item);
     });
+    fillScheduleMalScores(list);
 }
+// "Hide shows I've seen": redraw what it affects when it's switched or your list changes.
+function updateHideSeenHint() {
+    const hint = document.getElementById('hide-seen-hint');
+    if (!hint) return;
+    const hasList = typeof MalSync !== 'undefined' && typeof MalSync.listEntries === 'function' && MalSync.listEntries().length > 0;
+    hint.textContent = hasList || !hideSeenEnabled
+        ? "Leaves shows you've watched, finished, paused or dropped out of Top Rated, Discover and recommendations. Trending still shows everything."
+        : 'Log in to MyAnimeList below so AniZone knows what you have seen.';
+}
+function refreshForHideSeen() {
+    lastSeenKey = seenIdsKey(seenMalIds());
+    loadDashboardRows({ silent: true });
+    if (['top', 'discover'].includes(currentActiveRowTarget) && !document.getElementById('view-results')?.classList.contains('hidden')) fetchExpandedGridData();
+    if (currentDetailAnime && !document.getElementById('view-details')?.classList.contains('hidden')) renderRecommendations(currentDetailAnime);
+}
+document.addEventListener('DOMContentLoaded', () => {
+    if (typeof malSyncHas === 'function' && malSyncHas('subscribe')) MalSync.subscribe(() => {
+        updateHideSeenHint();
+        if (hideSeenEnabled && seenIdsKey(seenMalIds()) !== lastSeenKey) refreshForHideSeen();
+    });
+});
 // When your MyAnimeList list loads or changes, re-sort the schedule on screen.
 document.addEventListener('DOMContentLoaded', () => {
     if (typeof malSyncHas === 'function' && malSyncHas('subscribe')) MalSync.subscribe(() => {
@@ -3337,6 +3463,39 @@ function getSelectedWatchSite() {
 function refreshCurrentStreamingLinks() {
     if (currentDetailAnime && !document.getElementById('view-details')?.classList.contains('hidden')) buildStreamingLinks(currentDetailAnime);
 }
+// Settings menu: Content, MyAnimeList and Watch website fold away, one open at a time,
+// each showing its current setting on the closed header. The last one opened is remembered.
+const SETTINGS_FOLD_KEY = 'anizone:settings-open:v1';
+function initSettingsFolds(panel) {
+    const folds = [...panel.querySelectorAll('details.settings-fold')];
+    let remembered = '';
+    try { remembered = localStorage.getItem(SETTINGS_FOLD_KEY) || ''; } catch { /* nothing remembered */ }
+    folds.forEach(fold => {
+        if (fold.dataset.fold === remembered) fold.open = true;
+        fold.addEventListener('toggle', () => {
+            if (fold.open) folds.forEach(other => { if (other !== fold) other.open = false; });
+            const open = folds.find(item => item.open);
+            try { localStorage.setItem(SETTINGS_FOLD_KEY, open ? open.dataset.fold : ''); } catch { /* fine */ }
+        });
+    });
+    // MyAnimeList header: your name, or what's needed to connect.
+    const mal = document.getElementById('mal-settings');
+    const malSum = document.getElementById('mal-sum');
+    if (mal && malSum) {
+        const update = () => {
+            const name = mal.querySelector('.mal-account strong')?.textContent;
+            malSum.textContent = name || (mal.querySelector('[data-mal-action="login"]') ? 'Not logged in' : 'Not set up');
+        };
+        new MutationObserver(update).observe(mal, { childList: true });
+        update();
+    }
+}
+function updateContentSummary() {
+    const summary = document.getElementById('content-sum');
+    if (!summary) return;
+    const parts = [adultContentEnabled ? '18+ on' : '', hideSeenEnabled ? 'Hiding seen' : ''].filter(Boolean);
+    summary.textContent = parts.join(' · ') || 'Default';
+}
 function initThemes() {
     const host = document.getElementById('theme-options');
     const menuButton = document.getElementById('theme-menu-btn');
@@ -3367,6 +3526,8 @@ function initThemes() {
         localStorage.setItem(THEME_KEY, selected.id);
         avatar.src = selected.avatar;
         avatar.alt = `${selected.label} theme`;
+        const current = document.getElementById('theme-current');
+        if (current) current.textContent = selected.label;
         host.querySelectorAll('.theme-option').forEach(button => button.classList.toggle('active', button.dataset.theme === selected.id));
     };
     const persistSites = sites => saveJson(WATCH_SITES_KEY, sites.slice(0, 3));
@@ -3394,12 +3555,15 @@ function initThemes() {
             watchHost.appendChild(row);
         });
         addWatchSiteButton.disabled = sites.length >= 3;
+        const summary = document.getElementById('watch-sum');
+        if (summary) summary.textContent = selected.name;
     };
 
     host.innerHTML = '';
     themes.forEach(theme => {
         const button = document.createElement('button');
         button.type = 'button'; button.className = 'theme-option'; button.dataset.theme = theme.id; button.setAttribute('role', 'menuitem');
+        button.title = theme.label; button.setAttribute('aria-label', `${theme.label} theme`);
         button.innerHTML = `<span class="theme-swatch" style="--theme-swatch:${theme.color}"></span><span>${theme.label}</span>`;
         button.addEventListener('click', event => { event.stopPropagation(); apply(theme.id); });
         host.appendChild(button);
@@ -3423,6 +3587,7 @@ function initThemes() {
         document.getElementById('theme-menu-wrap')?.classList.toggle('open', opening);
     });
     menuPanel.addEventListener('click', event => event.stopPropagation());
+    initSettingsFolds(menuPanel);
     document.addEventListener('click', event => { if (!document.getElementById('theme-menu-wrap')?.contains(event.target)) closeMenu(); });
     document.addEventListener('keydown', event => { if (event.key === 'Escape') closeMenu(); });
 
@@ -3505,7 +3670,7 @@ function renderTrailer(anime){
         box.innerHTML=`<div class="trailer-player"><iframe allowfullscreen referrerpolicy="origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" src="https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0&enablejsapi=1&origin=${origin}&widget_referrer=${widgetReferrer}" title="${escapeHtml(displayTitle(anime))} official trailer"></iframe><a class="trailer-external-link" href="${watchUrl}" target="_blank" rel="noopener">Open on YouTube ↗</a></div>`;
     });
 }
-function renderRecommendations(anime){const box=document.getElementById('detail-recommendations'); if(!box)return; box.innerHTML=''; const recs=(anime.recommendations?.nodes||[]).map(x=>x.mediaRecommendation).filter(Boolean).filter(x=>adultContentEnabled||!x.isAdult); if(!recs.length)return box.innerHTML='<div class="empty-state">No recommendations yet.</div>'; recs.slice(0,12).forEach(x=>box.appendChild(createAnimeCard(x)));}
+function renderRecommendations(anime){const box=document.getElementById('detail-recommendations'); if(!box)return; box.innerHTML=''; const recs=(anime.recommendations?.nodes||[]).map(x=>x.mediaRecommendation).filter(Boolean).filter(x=>adultContentEnabled||!x.isAdult); const shown=withoutSeen(recs); if(!shown.length)return box.innerHTML=`<div class="empty-state">${recs.length?"You've seen everything recommended here.":'No recommendations yet.'}</div>`; shown.slice(0,12).forEach(x=>box.appendChild(createAnimeCard(x)));}
 function renderStaff(anime){
     const box=document.getElementById('detail-staff');
     if(!box)return;

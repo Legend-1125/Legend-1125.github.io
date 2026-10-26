@@ -815,10 +815,11 @@ const MalSync = (() => {
             }
             if (entry.status === 'plan_to_watch') continue;   // tastes come from what you've actually watched
             for (const genre of entry.genres || []) {
-                const g = genres.get(genre) || { name: genre, count: 0, scoreSum: 0, scored: 0, best: null };
+                const g = genres.get(genre) || { name: genre, count: 0, scoreSum: 0, scored: 0, best: null, pictured: [] };
                 g.count++;
                 if (entry.score) { g.scoreSum += entry.score; g.scored++; }
                 if (entry.picture && (!g.best || better(g.best, entry) > 0)) g.best = entry;
+                if (entry.picture) g.pictured.push(entry);
                 genres.set(genre, g);
             }
             const type = TYPES[typeGroup(entry.mediaType)] || 'Other';
@@ -909,16 +910,21 @@ const MalSync = (() => {
         const typeRows = st.types.map(([type, n]) => `<div class="stats-row"><span class="stats-row-label">${escapeHtml(type)}</span><span class="stats-row-track"><span class="stats-row-bar" style="width:${(n / maxType) * 100}%"></span></span><span class="stats-row-value">${formatNumber(n)}<small>${pct(n, st.started)}%</small></span></div>`).join('');
 
         // Genres: the top six as picture tiles (your best-rated show in each), then the next few.
+        // Each tile gets a different show: the best-rated one not already used by a tile above.
         const topGenres = st.genres.slice(0, 6);
+        const usedPictures = new Set();
         const genreTiles = topGenres.map((g, i) => {
-            const picture = safePicture(g.best?.picture);
+            const ranked = [...(g.pictured || [])].sort(better).filter(entry => safePicture(entry.picture));
+            const pick = ranked.find(entry => !usedPictures.has(entry.id) && !usedPictures.has(entry.picture)) || g.best;
+            if (pick) { usedPictures.add(pick.id); usedPictures.add(pick.picture); }
+            const picture = safePicture(pick?.picture);
             const avg = g.scored ? (g.scoreSum / g.scored).toFixed(1) : '';
-            return `<a class="stats-genre" href="${listHash('all', { ...defaultListView(), genre: g.name })}">${picture ? `<img src="${escapeHtml(picture)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}<span class="stats-genre-rank">#${i + 1}</span><span class="stats-genre-text"><strong>${escapeHtml(g.name)}</strong><span>${formatNumber(g.count)} anime${avg ? ` · ★ ${avg}` : ''}</span></span></a>`;
+            return `<a class="stats-genre" href="${listHash('all', { ...defaultListView(), genre: g.name })}">${picture ? `<img src="${escapeHtml(picture)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}<span class="stats-genre-rank">#${i + 1}</span><span class="stats-genre-text"><strong>${escapeHtml(g.name)}</strong><span>${formatNumber(g.count)} anime${avg ? ` · avg ${avg}` : ''}</span></span></a>`;
         }).join('');
         const moreGenres = st.genres.slice(6, 14).map(g => `<a class="stats-genre-chip" href="${listHash('all', { ...defaultListView(), genre: g.name })}">${escapeHtml(g.name)}<b>${formatNumber(g.count)}</b></a>`).join('');
 
         // Favourites and hot takes
-        const favourites = st.favourites.map(entry => `<a class="stats-fav" href="${malLink(entry)}" title="${escapeHtml(displayTitleOf(entry))}"><span class="stats-fav-poster">${safePicture(entry.picture) ? `<img src="${escapeHtml(entry.picture)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}<b>★ ${entry.score}</b></span><span class="stats-fav-title">${escapeHtml(displayTitleOf(entry))}</span></a>`).join('');
+        const favourites = st.favourites.map(entry => `<a class="stats-fav" href="${malLink(entry)}" title="${escapeHtml(displayTitleOf(entry))}"><span class="stats-fav-poster">${safePicture(entry.picture) ? `<img src="${escapeHtml(entry.picture)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}<b>${entry.score}<small>/10</small></b></span><span class="stats-fav-title">${escapeHtml(displayTitleOf(entry))}</span></a>`).join('');
         const take = ({ entry, diff }) => `<a class="stats-take" href="${malLink(entry)}">${safePicture(entry.picture) ? `<img src="${escapeHtml(entry.picture)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<span class="stats-take-ph"></span>'}<span class="stats-take-text"><strong>${escapeHtml(displayTitleOf(entry))}</strong><span>You ${entry.score} · MAL ${Number(entry.mean).toFixed(2)}</span></span><b class="stats-take-diff">${diff > 0 ? '+' : ''}${diff.toFixed(1)}</b></a>`;
         const takes = (st.loved.length || st.notForYou.length) ? `
             <section class="stats-card stats-takes">
@@ -978,7 +984,7 @@ const MalSync = (() => {
                 </section>
             </div>
             ${topGenres.length ? `<section class="stats-card">
-                <h3>Your top genres <span class="stats-sub">pictured: your highest-rated show in each</span></h3>
+                <h3>Your top genres <span class="stats-sub">pictured: a top-rated show of yours from each</span></h3>
                 <div class="stats-genres">${genreTiles}</div>
                 ${moreGenres ? `<div class="stats-genre-more"><span>Also into</span>${moreGenres}</div>` : ''}
             </section>` : ''}
@@ -1074,7 +1080,7 @@ const MalSync = (() => {
             </div>
             <div class="mal-row-stats">
                 <span class="mal-row-status">${escapeHtml(STATUS_LABEL[entry.status] || '')}</span>
-                ${stat('Mine', entry.score ? `★ ${entry.score}` : '')}
+                ${stat('Mine', entry.score ? String(entry.score) : '')}
                 ${stat('MAL', entry.mean ? Number(entry.mean).toFixed(2) : '')}
             </div>
         </a>`;
@@ -1091,7 +1097,7 @@ const MalSync = (() => {
         card.className = 'anime-card mal-card';
         const title = displayTitleOf(entry);
         const statusLabel = currentTab === 'all' ? STATUS_LABEL[entry.status] : '';
-        const meta = [statusLabel, entry.status === 'plan_to_watch' ? `${entry.episodes || '?'} ep` : `Ep ${progressText(entry)}`, entry.score ? `★ ${entry.score}` : ''].filter(Boolean).join(' · ');
+        const meta = [statusLabel, entry.status === 'plan_to_watch' ? `${entry.episodes || '?'} ep` : `Ep ${progressText(entry)}`, entry.score ? `Scored ${entry.score}` : ''].filter(Boolean).join(' · ');
         card.innerHTML = `<a class="anime-card-link" href="#/mal/${entry.id}" title="${escapeHtml(title)}"><img src="${escapeHtml(entry.picture)}" alt="" loading="lazy">${currentTab === 'all' ? `<span class="mal-card-status mal-status-${entry.status}" aria-hidden="true"></span>` : ''}<div class="anime-card-overlay"></div><div class="anime-card-title"><strong class="anime-card-name">${escapeHtml(title)}</strong><span>${escapeHtml(meta)}</span></div><div class="mal-card-progress" aria-hidden="true"><span style="width:${progressPercent(entry)}%"></span></div></a>`;
         const plus = plusButton(entry, title);
         if (plus) card.appendChild(plus);
@@ -1169,6 +1175,8 @@ const MalSync = (() => {
     function openSettings() {
         const panel = $('theme-menu-panel');
         if (panel?.classList.contains('hidden')) $('theme-menu-btn')?.click();
+        const fold = $('mal-settings')?.closest('details');
+        if (fold) fold.open = true;
         setTimeout(() => $('mal-settings')?.scrollIntoView({ block: 'nearest' }), 50);
     }
     function renderSettings() {
