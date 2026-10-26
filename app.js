@@ -1111,12 +1111,25 @@ function initNavigation() {
     document.getElementById('back-btn')?.addEventListener('click', goBack);
     const hamburger = document.getElementById('hamburger-btn');
     const panel = document.getElementById('nav-menu-panel');
-    hamburger?.addEventListener('click', () => {
+    const closeMenu = () => {
+        if (!panel?.classList.contains('open-panel')) return;
+        hamburger?.setAttribute('aria-expanded', 'false');
+        hamburger?.classList.remove('open');
+        panel.classList.remove('open-panel');
+    };
+    let openedAtY = 0;
+    hamburger?.addEventListener('click', event => {
+        event.stopPropagation();
         const open = hamburger.getAttribute('aria-expanded') === 'true';
         hamburger.setAttribute('aria-expanded', String(!open));
-        hamburger.classList.toggle('open');
-        panel?.classList.toggle('open-panel');
+        hamburger.classList.toggle('open', !open);
+        panel?.classList.toggle('open-panel', !open);
+        openedAtY = window.scrollY;
     });
+    // The menu closes as soon as you start scrolling, tap outside it, or press Escape.
+    window.addEventListener('scroll', () => { if (Math.abs(window.scrollY - openedAtY) > 8) closeMenu(); }, { passive: true });
+    document.addEventListener('click', event => { if (!panel?.contains(event.target) && !hamburger?.contains(event.target)) closeMenu(); });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') closeMenu(); });
 }
 
 function initPreferences() {
@@ -3064,20 +3077,31 @@ function renderScheduleList(items) {
     list.innerHTML = '';
     if (!items.length) { list.innerHTML = '<div class="schedule-empty"><span>No episodes scheduled.</span></div>'; return; }
     const now = Date.now();
+    let sawAired = false, nowMarked = false;
     items.sort((a, b) => a.airingAt - b.airingAt).forEach(entry => {
         const anime = entry.media;
         const time = new Date(entry.airingAt * 1000);
         const aired = time.getTime() <= now;
+        // One "Now" line between what has aired and what's still to come (today only).
+        if (aired) sawAired = true;
+        else if (sawAired && !nowMarked) {
+            nowMarked = true;
+            const line = document.createElement('div');
+            line.className = 'schedule-now';
+            line.innerHTML = '<span>Now</span>';
+            list.appendChild(line);
+        }
         const title = displayTitle(anime);
+        const clock = time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
         const item = document.createElement('a');
-        item.className = `schedule-item${aired ? ' aired' : ''}`;
+        item.className = `schedule-item${aired ? ' aired' : ' upcoming'}`;
         item.href = animeHash(anime.id);
-        item.innerHTML = `<time class="sched-time" datetime="${time.toISOString()}">${time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>`
+        // Grey time = already aired; coloured time = still to come.
+        item.innerHTML = `<time class="sched-time" datetime="${time.toISOString()}" title="${aired ? 'Aired' : 'Airs'} at ${clock}" aria-label="${aired ? 'Aired' : 'Airs'} at ${clock}">${clock}</time>`
             + `<img class="sched-poster" src="${escapeHtml(imageUrl(anime))}" alt="" loading="lazy">`
             + `<div class="sched-info"><div class="sched-anime-title">${escapeHtml(title)}</div>`
             + `<div class="sched-meta"><span class="sched-ep">Episode ${entry.episode}${anime.episodes ? ` of ${anime.episodes}` : ''}</span>`
-            + `${anime.genres?.length ? `<span class="sched-genres">${escapeHtml(anime.genres.slice(0, 2).join(' · '))}</span>` : ''}`
-            + `<span class="sched-badge ${aired ? 'aired' : 'airing'}">${aired ? 'Aired' : 'Upcoming'}</span></div></div>`
+            + `${anime.genres?.length ? `<span class="sched-genres">${escapeHtml(anime.genres.slice(0, 2).join(' · '))}</span>` : ''}</div></div>`
             + `${anime.averageScore ? `<div class="sched-score" title="AniList score (out of 100)">★ ${Math.round(anime.averageScore)}</div>` : ''}`;
         list.appendChild(item);
     });

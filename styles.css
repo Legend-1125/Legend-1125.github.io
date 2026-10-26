@@ -1575,7 +1575,14 @@ body {
     white-space: nowrap;
     text-align: right;
 }
-.schedule-item.aired .sched-time { color: var(--text-muted); }
+.schedule-item.aired .sched-time { color: rgba(255,255,255,.38); font-weight: 600; }
+.schedule-item.aired .sched-poster { opacity: .7; }
+.schedule-item.aired .sched-anime-title { color: rgba(255,255,255,.78); }
+.schedule-item.upcoming .sched-time { color: color-mix(in srgb, var(--accent-red) 75%, #fff); font-size: 14px; font-weight: 800; }
+/* One line marking "now" between aired and upcoming episodes */
+.schedule-now { position: relative; display: flex; align-items: center; gap: 10px; margin: 4px 12px; color: var(--accent-red); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.schedule-now::after { content: ''; flex: 1; height: 2px; border-radius: 2px; background: linear-gradient(to right, var(--accent-red), transparent); }
+.schedule-now span { padding: 2px 9px; border-radius: 999px; background: color-mix(in srgb, var(--accent-red) 22%, transparent); }
 .sched-poster {
     grid-area: poster;
     width: 48px;
@@ -2742,10 +2749,17 @@ html, body { overflow-x: clip; }
 }
 @media (max-width: 1060px) {
     .nav-links {
-        display: none; position: absolute; top: 100%; left: 0; width: 100%;
-        flex-direction: column; align-items: stretch; gap: 4px; padding: 16px 5%;
-        background: rgba(15,15,15,0.96); backdrop-filter: blur(20px); border-bottom: 1px solid var(--glass-border);
+        /* A compact card under the menu button, not a full-width panel. */
+        display: none; position: absolute; top: calc(100% + 6px); left: max(12px, 3%); right: auto;
+        width: 220px; max-width: calc(100vw - 24px);
+        flex-direction: column; align-items: stretch; gap: 2px; padding: 8px;
+        background: rgba(20,20,20,0.97); backdrop-filter: blur(20px);
+        border: 1px solid rgba(255,255,255,.12); border-radius: 16px;
+        box-shadow: 0 18px 50px rgba(0,0,0,.6);
     }
+    .nav-links .nav-btn { width: 100%; padding: 10px 12px; border-radius: 10px; font-size: 14px; }
+    .nav-links .nav-btn.active { background: rgba(255,255,255,.07); }
+    .nav-links #shuffle-btn { margin-top: 4px; }
     .nav-links.open-panel { display: flex; }
     .hamburger { display: flex; }
     .hamburger.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
