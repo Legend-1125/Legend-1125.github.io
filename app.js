@@ -1033,8 +1033,9 @@ function showResultsRoute(route) {
         currentSearchQuery = route.query;
         searchCorrectedFrom = route.from || '';
         currentActiveRowTarget = 'search';
-        if (searchInput && document.activeElement !== searchInput) searchInput.value = route.query;
-        clearSearchBtn?.classList.toggle('hidden', !route.query);
+        // The box is left empty after a search; the page title shows what was searched.
+        if (searchInput && document.activeElement !== searchInput) searchInput.value = '';
+        clearSearchBtn?.classList.add('hidden');
         setPageTitle(`Search: ${route.query}`);
     } else if (route.name === 'studio') {
         if (selectedStudioId !== route.id) selectedStudioName = '';
@@ -1208,12 +1209,16 @@ function initSearchEngine() {
     });
     searchInput?.addEventListener('keydown', event => {
         if (event.key !== 'Enter') return;
+        clearTimeout(timer);   // a suggestion lookup waiting to start must not reopen the list
         suggestionController?.abort();
         suggestionsDropdown?.classList.add('hidden');
         const query = searchInput.value.trim();
         if (query) {
             executeGlobalSearch(query, 1);
             collapseSearch();
+            searchInput.blur();
+            searchInput.value = '';
+            clearSearchBtn?.classList.add('hidden');
         }
     });
     clearSearchBtn?.addEventListener('click', () => {
@@ -1250,6 +1255,8 @@ async function fetchSearchSuggestions(queryText) {
         const anime = data?.anime?.media || [];
         const studios = data?.studios?.studios || [];
         if (!anime.length && !studios.length) return;
+        // Only while you're still typing this in the box (not after you've searched).
+        if (document.activeElement !== searchInput || searchInput.value.trim() !== queryText) return;
         suggestionsDropdown.innerHTML = '';
         anime.forEach(item => {
             const row = document.createElement('div');
@@ -1593,10 +1600,14 @@ async function loadSeasonalPage(page, { retried = false } = {}) {
     const view = seasonalView;
     if (page === 1) { grid.innerHTML = '<div class="spinner"></div>'; setSeasonalStatus(''); }
     if (more) { more.disabled = true; more.textContent = 'Loading…'; }
-    const query = `query ($page: Int, $perPage: Int, $season: MediaSeason, $year: Int, $formats: [MediaFormat], $genre: String, $sort: [MediaSort], $isAdult: Boolean) {
+    // Filters that don't apply are left out of the request entirely: AniList reads
+    // an empty value (null) as "must be empty", which matches nothing.
+    const genreArg = view.genre ? ', genre: $genre' : '';
+    const adultArg = adultContentEnabled ? '' : ', isAdult: false';
+    const query = `query ($page: Int, $perPage: Int, $season: MediaSeason, $year: Int, $formats: [MediaFormat], $sort: [MediaSort]${view.genre ? ', $genre: String' : ''}) {
         Page(page: $page, perPage: $perPage) {
             pageInfo { total hasNextPage }
-            media(type: ANIME, season: $season, seasonYear: $year, format_in: $formats, genre: $genre, sort: $sort, isAdult: $isAdult) {
+            media(type: ANIME, season: $season, seasonYear: $year, format_in: $formats, sort: $sort${genreArg}${adultArg}) {
                 id idMal isAdult format episodes duration status source genres averageScore popularity
                 title { romaji english native } coverImage { large extraLarge color }
                 startDate { year month day } description(asHtml: false)
@@ -1607,10 +1618,11 @@ async function loadSeasonalPage(page, { retried = false } = {}) {
     }`;
     const variables = {
         page, perPage: SEASONAL_PAGE_SIZE, season: view.season, year: view.year,
-        formats: view.format ? [view.format] : Object.keys(SEASONAL_FORMATS), genre: view.genre || null,
-        sort: view.sort === 'popularity' ? ['POPULARITY_DESC'] : [SEASONAL_SORTS[view.sort][1], 'POPULARITY_DESC'], isAdult: adultContentEnabled ? null : false,
+        formats: view.format ? [view.format] : Object.keys(SEASONAL_FORMATS),
+        sort: view.sort === 'popularity' ? ['POPULARITY_DESC'] : [SEASONAL_SORTS[view.sort][1], 'POPULARITY_DESC'],
+        ...(view.genre ? { genre: view.genre } : {}),
     };
-    const cacheKey = `seasonal:v1:${view.season}:${view.year}:${view.format}:${view.genre}:${view.sort}:${adultContentEnabled}:${page}`;
+    const cacheKey = `seasonal:v2:${view.season}:${view.year}:${view.format}:${view.genre}:${view.sort}:${adultContentEnabled}:${page}`;
     try {
         const data = await aniRequest(query, variables, { cacheKey, ttl: 30 * 60 * 1000, priority: 'interactive' });
         if (token !== seasonalToken) return;
@@ -1709,7 +1721,9 @@ function drawSeasonal() {
     const loggedIn = typeof MalSync !== 'undefined' && MalSync.isLoggedIn();
     const visible = seasonalItems.filter(anime => (adultContentEnabled || !anime.isAdult)
         && !(seasonalView.hideListed && loggedIn && anime.idMal && malSyncHas('entryFor') && MalSync.entryFor(anime.idMal)));
-    if (count) count.textContent = seasonalItems.length ? `${seasonalTotal} anime${visible.length !== seasonalItems.length ? ` · ${seasonalItems.length - visible.length} on your list hidden` : ''}` : '';
+    // No totals from AniList (it caps them); only how many of yours are hidden.
+    const hiddenCount = seasonalItems.length - visible.length;
+    if (count) count.textContent = hiddenCount > 0 ? `${hiddenCount} on your list hidden` : '';
     more?.classList.toggle('hidden', !seasonalHasMore);
     if (!visible.length) {
         grid.innerHTML = seasonalItems.length
@@ -2358,7 +2372,7 @@ function renderSearchStudios(match) {
         const studio = match.strong;
         box.innerHTML = `<section class="search-studio">
             <div class="search-studio-head">
-                <div><span class="stats-eyebrow">Studio</span><h3>${escapeHtml(studio.name)}</h3><span class="search-studio-meta">${studio.total.toLocaleString()} anime · most popular first</span></div>
+                <div><span class="stats-eyebrow">Studio</span><h3>${escapeHtml(studio.name)}</h3><span class="search-studio-meta">Most popular first</span></div>
                 <a class="see-more-btn" href="${studioHash(studio.id, studio.name)}">See all ${escapeHtml(studio.name)} anime <span>›</span></a>
             </div>
             <div class="slider-container"><button class="slider-arrow left-arrow" type="button" aria-label="Scroll left">‹</button><div class="slider-track" id="search-studio-track"></div><button class="slider-arrow right-arrow" type="button" aria-label="Scroll right">›</button></div>
@@ -2466,15 +2480,15 @@ function renderResultsPage(grid, items, pageInfo) {
     grid.innerHTML = '';
     if (!items.length) grid.innerHTML = '<div class="empty-state">No matching anime found.</div>';
     else items.forEach(item => grid.appendChild(createAnimeCard(item)));
-    const apiTotal = Number(pageInfo?.total || 0);
+    // AniList stops counting at 500/5,000, so its totals aren't real numbers. A count is
+    // shown only when it's exact: when this is the last page of results.
     const perPage = Number(pageInfo?.perPage || items.length || 1);
     const exactTotal = pageInfo && !pageInfo.hasNextPage
         ? Math.max(0, (Number(pageInfo.currentPage || currentPage) - 1) * perPage + items.length)
         : null;
-    const totalLabel = exactTotal != null
-        ? `${exactTotal.toLocaleString()} Titles`
-        : `${Math.max(items.length, (Number(pageInfo?.currentPage || currentPage) - 1) * perPage + items.length).toLocaleString()}+ Titles`;
-    document.getElementById('results-count').textContent = currentActiveRowTarget === 'search' ? totalLabel : `${apiTotal.toLocaleString()} Titles`;
+    const countTag = document.getElementById('results-count');
+    countTag.textContent = exactTotal ? `${exactTotal.toLocaleString()} ${exactTotal === 1 ? 'title' : 'titles'}` : '';
+    countTag.classList.toggle('hidden', !exactTotal);
     updatePaginationControls(pageInfo);
     restorePendingScroll();
 }
@@ -2578,19 +2592,25 @@ function renderAnimeDetails(anime) {
     const alternate = secondaryTitle(anime);
     document.getElementById('detail-title').innerHTML = `${escapeHtml(primary)}${alternate ? `<span class="detail-alt-title">${escapeHtml(alternate)}</span>` : ''}`;
     document.getElementById('detail-title').classList.toggle('long-title', primary.length > 45);
-    document.getElementById('detail-synopsis').textContent = stripHtml(anime.description) || 'No synopsis available.';
+    setSynopsis(stripHtml(anime.description) || 'No synopsis available.');
     const adultWarning = document.getElementById('detail-adult-warning');
     if (adultWarning) adultWarning.classList.toggle('hidden', !anime.isAdult);
-    document.getElementById('badge-score').textContent = anime.averageScore ? `★ AniList ${Math.round(anime.averageScore)}` : 'AniList —';
+    const aniBadge = document.getElementById('badge-score');
+    aniBadge.textContent = anime.averageScore ? `★ AniList ${Math.round(anime.averageScore)}` : 'AniList';
+    aniBadge.href = anime.siteUrl || `https://anilist.co/anime/${Number(anime.id)}`;
+    aniBadge.setAttribute('aria-label', `${aniBadge.textContent}. Open on AniList`);
     const malBadge = document.getElementById('badge-mal-score');
     if (malBadge) {
+        if (anime.idMal) malBadge.href = `https://myanimelist.net/anime/${Number(anime.idMal)}`; else malBadge.removeAttribute('href');
         malBadge.textContent = anime.idMal ? 'MAL …' : 'MAL N/A';
         malBadge.title = anime.idMal ? 'Loading MyAnimeList score…' : '';
         malBadge.classList.toggle('hidden', !anime.idMal);
     }
     loadMalScoreIntoDetails(anime);
     document.getElementById('badge-year').textContent = anime.seasonYear || anime.startDate?.year || 'TBA';
-    document.getElementById('badge-rating').textContent = anime.isAdult ? '18+' : 'General';
+    const rating = document.getElementById('badge-rating');
+    rating.textContent = anime.isAdult ? '18+' : '';
+    rating.classList.toggle('hidden', !anime.isAdult);
     document.getElementById('badge-episodes').textContent = anime.episodes ? `${anime.episodes} Episodes` : 'Episodes TBA';
     document.getElementById('badge-type').textContent = formatFormat(anime.format);
     document.getElementById('badge-status').textContent = formatStatus(anime.status);
@@ -2630,13 +2650,31 @@ function buildStreamingLinks(anime) {
     const title = anime.title?.english || anime.title?.romaji || '';
     const selectedSite = getSelectedWatchSite();
     const watchUrl = buildWatchUrl(selectedSite.url, title);
-    const malLink = anime.idMal
-        ? `<a class="watch-now-btn watch-myanimelist" href="https://myanimelist.net/anime/${Number(anime.idMal)}" target="_blank" rel="noopener noreferrer">ⓘ MyAnimeList</a>`
-        : '';
+    // AniList and MyAnimeList are linked from their score badges above.
     document.getElementById('streaming-links-container').innerHTML = `
-        <a class="watch-now-btn watch-custom" href="${escapeHtml(watchUrl)}" target="_blank" rel="noopener noreferrer">▶ Watch on ${escapeHtml(selectedSite.name)}</a>
-        <a class="watch-now-btn watch-anilist" href="${escapeHtml(anime.siteUrl || `https://anilist.co/anime/${anime.id}`)}" target="_blank" rel="noopener noreferrer">ⓘ AniList</a>
-        ${malLink}`;
+        <a class="watch-now-btn watch-custom" href="${escapeHtml(watchUrl)}" target="_blank" rel="noopener noreferrer">▶ Watch on ${escapeHtml(selectedSite.name)}</a>`;
+}
+// Long synopses fold to a few lines, with "Read more" to open them.
+function setSynopsis(text) {
+    const box = document.getElementById('detail-synopsis');
+    if (!box) return;
+    box.textContent = text;
+    box.classList.add('folded');
+    box.nextElementSibling?.classList?.contains('synopsis-toggle') && box.nextElementSibling.remove();
+    requestAnimationFrame(() => {
+        if (box.scrollHeight <= box.clientHeight + 2) { box.classList.remove('folded'); return; }
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'synopsis-toggle';
+        toggle.textContent = 'Read more';
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.addEventListener('click', () => {
+            const open = box.classList.toggle('folded') === false;
+            toggle.textContent = open ? 'Show less' : 'Read more';
+            toggle.setAttribute('aria-expanded', String(open));
+        });
+        box.after(toggle);
+    });
 }
 function updateCastLanguageControls() {
     document.querySelectorAll('[data-cast-language]').forEach(button => {
@@ -2879,10 +2917,10 @@ const SURPRISE_RECENT_KEY = 'anizone:surprise:recent:v1';
 const SURPRISE_TTL = 24 * 60 * 60 * 1000;
 
 function surprisePage(page) {
-    const query = `query ($page: Int!, $perPage: Int!, $popularity: Int, $score: Int, $formats: [MediaFormat], $isAdult: Boolean) {
+    const query = `query ($page: Int!, $perPage: Int!, $popularity: Int, $score: Int, $formats: [MediaFormat]) {
         Page(page: $page, perPage: $perPage) {
             pageInfo { total lastPage }
-            media(type: ANIME, sort: POPULARITY_DESC, status_not: NOT_YET_RELEASED, popularity_greater: $popularity, averageScore_greater: $score, format_in: $formats, isAdult: $isAdult) { id idMal isAdult title { romaji english native } }
+            media(type: ANIME, sort: POPULARITY_DESC, status_not: NOT_YET_RELEASED, popularity_greater: $popularity, averageScore_greater: $score, format_in: $formats${adultContentEnabled ? '' : ', isAdult: false'}) { id idMal isAdult title { romaji english native } }
         }
     }`;
     return aniRequest(query, {
@@ -2891,8 +2929,7 @@ function surprisePage(page) {
         popularity: SURPRISE_FILTERS.popularity,
         score: SURPRISE_FILTERS.score,
         formats: SURPRISE_FILTERS.formats,
-        isAdult: adultContentEnabled ? null : false,
-    }, { cacheKey: `surprise:v2:${adultContentEnabled}:${page}`, ttl: SURPRISE_TTL, priority: 'interactive' });
+    }, { cacheKey: `surprise:v3:${adultContentEnabled}:${page}`, ttl: SURPRISE_TTL, priority: 'interactive' });
 }
 
 async function triggerRandomShuffle() {

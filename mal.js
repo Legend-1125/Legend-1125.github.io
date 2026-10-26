@@ -463,9 +463,8 @@ const MalSync = (() => {
             return;
         }
         if (!isConfigured() || !isLoggedIn()) {
-            box.innerHTML = `<section class="mal-progress-panel" aria-labelledby="mal-progress-title">
-                <div class="mal-progress-top"><h3 class="mal-progress-title" id="mal-progress-title">My progress</h3></div>
-                <div class="mal-progress-cta"><span>Track episodes, status and your score on MyAnimeList.</span>
+            box.innerHTML = `<section class="mal-progress-panel mal-bar-panel" aria-label="My progress on MyAnimeList">
+                <div class="mal-bar mal-bar-cta"><span>Track your episodes, status and score</span>
                 <button class="mal-pill-btn" type="button" data-mal-action="login">${isConfigured() ? 'Log in with MyAnimeList' : 'Set up MyAnimeList'}</button></div>
             </section>`;
             box.querySelector('[data-mal-action="login"]').addEventListener('click', () => isConfigured() ? startLogin() : openSettings());
@@ -501,13 +500,9 @@ const MalSync = (() => {
         const status = entry?.status || '';
         const score = entry?.score || 0;
         const focused = document.activeElement?.closest?.('#mal-progress [data-mal-focus]')?.dataset.malFocus;
-        box.innerHTML = `<section class="mal-progress-panel" aria-labelledby="mal-progress-title">
-            <div class="mal-progress-top">
-                <h3 class="mal-progress-title" id="mal-progress-title">My progress</h3>
-                <span class="mal-save-state" data-mal-state aria-live="polite"></span>
-                <a class="mal-progress-link" href="https://myanimelist.net/anime/${malId}" target="_blank" rel="noopener">MyAnimeList ↗</a>
-            </div>
-            <div class="mal-progress-controls">
+        const percent = entry ? progressPercent({ ...entry, episodes: total }) : 0;
+        box.innerHTML = `<section class="mal-progress-panel mal-bar-panel" aria-label="My progress on MyAnimeList">
+            <div class="mal-bar">
                 <div class="mal-control mal-status-pick mal-status-${status || 'none'}" data-mal-focus="status">
                     <select data-mal="status" aria-label="Status on my list">
                         <option value="">Add to my list</option>
@@ -516,17 +511,18 @@ const MalSync = (() => {
                 </div>
                 <div class="mal-stepper" role="group" aria-label="Episodes watched" data-mal-focus="episodes">
                     <button type="button" data-mal="minus" aria-label="One episode fewer"${watched <= 0 ? ' disabled' : ''}>−</button>
-                    <label class="mal-stepper-value"><input data-mal="episodes" type="number" inputmode="numeric" min="0"${total ? ` max="${total}"` : ''} value="${watched}" aria-label="Episodes watched"><span>/ ${total || '?'} ep</span></label>
+                    <label class="mal-stepper-value"><input data-mal="episodes" type="number" inputmode="numeric" min="0"${total ? ` max="${total}"` : ''} value="${watched}" aria-label="Episodes watched"><span>/ ${total || '?'}</span></label>
                     <button type="button" data-mal="plus" aria-label="One more episode"${total && watched >= total ? ' disabled' : ''}>+</button>
                 </div>
                 <div class="mal-control mal-score-pick${score ? ' has-score' : ''}" data-mal-focus="score">
                     <select data-mal="score" aria-label="My score">
-                        ${SCORE_LABELS.map((label, value) => `<option value="${value}"${value === score ? ' selected' : ''}>${value ? `${value} · ${label}` : 'No score'}</option>`).reverse().join('')}
+                        ${SCORE_LABELS.map((label, value) => `<option value="${value}"${value === score ? ' selected' : ''}>${value ? `${value} · ${label}` : 'Score'}</option>`).reverse().join('')}
                     </select>
                 </div>
-                ${entry ? '<button type="button" class="mal-remove-btn" data-mal="remove" data-mal-focus="remove" title="Remove from my list" aria-label="Remove from my list">Remove</button>' : ''}
+                ${entry ? '<button type="button" class="mal-remove-btn" data-mal="remove" data-mal-focus="remove" title="Remove from my list" aria-label="Remove from my list"><svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></button>' : ''}
+                <span class="mal-bar-meter" aria-hidden="true"><span style="width:${percent}%"></span></span>
             </div>
-            <div class="mal-progress-meter" aria-hidden="true"><span style="width:${entry ? progressPercent({ ...entry, episodes: total }) : 0}%"></span></div>
+            <span class="mal-save-state" data-mal-state aria-live="polite"></span>
         </section>`;
         // The same rounded dropdowns as the rest of the site.
         box.querySelectorAll('select').forEach(select => { if (typeof enhanceSelect === 'function') enhanceSelect(select); });

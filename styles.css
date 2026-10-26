@@ -2732,3 +2732,91 @@ html, body { overflow-x: clip; }
 /* The results page makes grid cards full width; in the studio's sliding row they keep a poster size. */
 #view-results .search-studio .anime-card { flex:0 0 165px; width:165px; }
 @media (max-width: 600px) { #view-results .search-studio .anime-card { flex-basis:128px; width:128px; } }
+
+/* Navigation with seven items: labels never wrap; tighter spacing on mid-size
+   screens; the menu button (☰) takes over below 1060px instead of 769px. */
+.nav-btn { white-space: nowrap; }
+@media (max-width: 1280px) {
+    .nav-left, .nav-right { gap: 16px; }
+    .nav-btn { padding: 6px 8px; }
+}
+@media (max-width: 1060px) {
+    .nav-links {
+        display: none; position: absolute; top: 100%; left: 0; width: 100%;
+        flex-direction: column; align-items: stretch; gap: 4px; padding: 16px 5%;
+        background: rgba(15,15,15,0.96); backdrop-filter: blur(20px); border-bottom: 1px solid var(--glass-border);
+    }
+    .nav-links.open-panel { display: flex; }
+    .hamburger { display: flex; }
+    .hamburger.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+    .hamburger.open span:nth-child(2) { opacity: 0; }
+    .hamburger.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+}
+
+/* ==========================================
+   ANIME PAGE HEADER: calmer layout
+   Scores double as the AniList / MyAnimeList links; studio and status sit on
+   one quiet line; long synopses fold; progress is one bar.
+   ========================================== */
+.meta-badges { gap: 8px 12px; margin-bottom: 12px; }
+.badge.score-link { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border: 1px solid rgba(255,255,255,.12); border-radius: 999px; background: rgba(255,255,255,.06); font-size: 12.5px; font-weight: 700; text-decoration: none; transition: background .2s, border-color .2s; }
+.badge.score-link[href]::after { content: '↗'; color: rgba(255,255,255,.45); font-size: 11px; transition: color .2s; }
+.badge.score-link[href]:hover, .badge.score-link[href]:focus-visible { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.25); outline: none; }
+.badge.score-link[href]:hover::after { color: #fff; }
+.meta-badges .badge:not(.score-link) { color: rgba(255,255,255,.75); font-size: 13px; font-weight: 600; border: 0; padding: 0; }
+.meta-badges .badge.age-rating:not(.hidden) { padding: 2px 8px; border-radius: 6px; background: rgba(229,9,20,.85); color: #fff; font-size: 11.5px; }
+.meta-badges .badge:not(.score-link):not(.hidden) ~ .badge:not(.score-link):not(.hidden)::before { content: '·'; margin-right: 12px; color: rgba(255,255,255,.35); }
+.detail-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-bottom: 16px; color: rgba(255,255,255,.88); font-size: 13.5px; font-weight: 500; }
+.detail-facts .studio-link { font-weight: 600; }
+.detail-facts-sep { width: 4px; height: 4px; border-radius: 50%; background: rgba(255,255,255,.35); }
+.detail-facts .value:empty, .detail-facts .value:empty + .detail-facts-sep { display: none; }
+#detail-studio:empty + .detail-facts-sep { display: none; }
+.synopsis { margin-bottom: 8px; }
+.synopsis.folded { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.synopsis-toggle { margin: 0 0 20px; padding: 0; border: 0; background: none; color: var(--accent-cyan); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
+.synopsis-toggle:hover { text-decoration: underline; }
+.synopsis:not(.folded) + .synopsis-toggle { margin-top: 2px; }
+.info-container .synopsis:not(:has(+ .synopsis-toggle)) { margin-bottom: 20px; }
+
+/* My progress: one bar - status | episodes | score | remove - with a thin progress line */
+.mal-bar-panel { display: flex; flex-direction: column; gap: 6px; max-width: 560px; }
+.mal-bar { position: relative; display: flex; align-items: stretch; min-height: 48px; border: 1px solid rgba(255,255,255,.13); border-radius: 16px; background: rgba(12,12,12,.55); backdrop-filter: blur(10px); }
+.mal-bar > .mal-control, .mal-bar > .mal-stepper, .mal-bar > .mal-remove-btn { display: flex; align-items: center; }
+.mal-bar > .mal-stepper, .mal-bar > .mal-control + .mal-control, .mal-bar > .mal-remove-btn { border-left: 1px solid rgba(255,255,255,.09); }
+.mal-bar .mal-status-pick { flex: 1 1 auto; min-width: 0; }
+.mal-bar .mal-control .az-select { min-width: 0; width: 100%; }
+.mal-bar .mal-control .az-select-trigger { width: 100%; min-height: 46px; border: 0; border-radius: 0; background: transparent; box-shadow: none; padding-inline: 16px 12px; font-size: 13.5px; }
+.mal-bar .mal-status-pick .az-select-trigger { border-radius: 15px 0 0 15px; }
+.mal-bar .mal-control .az-select-trigger:hover { background: rgba(255,255,255,.05); }
+.mal-bar .mal-score-pick { flex: 0 0 auto; min-width: 128px; }
+.mal-bar .mal-stepper { flex: 0 0 auto; height: auto; border-top: 0; border-bottom: 0; border-right: 0; border-radius: 0; background: transparent; overflow: visible; }
+.mal-bar .mal-stepper button { width: 40px; font-size: 17px; }
+.mal-bar .mal-stepper button:hover:not(:disabled) { background: rgba(255,255,255,.08); }
+.mal-bar .mal-stepper-value { border-inline: 0; padding: 0 2px; font-size: 13px; }
+.mal-bar .mal-stepper input { width: 3.6ch; font-size: 15px; }
+.mal-bar .mal-remove-btn { flex: 0 0 auto; justify-content: center; width: 46px; height: auto; padding: 0; border: 0; border-left: 1px solid rgba(255,255,255,.09); border-radius: 0 15px 15px 0; background: transparent; color: var(--text-muted); }
+.mal-bar .mal-remove-btn:hover, .mal-bar .mal-remove-btn:focus-visible { color: #fca5a5; background: rgba(252,165,165,.08); }
+.mal-bar:not(:has(.mal-remove-btn)) .mal-score-pick .az-select-trigger { border-radius: 0 15px 15px 0; }
+.mal-bar-meter { position: absolute; left: 16px; right: 16px; bottom: -1px; height: 2px; border-radius: 2px; overflow: hidden; pointer-events: none; }
+.mal-bar-meter span { display: block; height: 100%; border-radius: inherit; background: var(--accent-red); transition: width .3s var(--transition-smooth); }
+.mal-bar-panel .mal-save-state { min-height: 16px; padding-left: 4px; font-size: 12px; }
+@media (max-width: 600px) {
+    .mal-bar { flex-wrap: wrap; }
+    .mal-bar .mal-status-pick { flex: 1 1 100%; border-bottom: 1px solid rgba(255,255,255,.09); }
+    .mal-bar .mal-status-pick .az-select-trigger { border-radius: 15px 15px 0 0; }
+    .mal-bar > .mal-stepper { flex: 1 1 auto; justify-content: space-between; border-left: 0; }
+    .mal-bar .mal-score-pick { flex: 1 1 auto; }
+    .mal-bar .mal-score-pick .az-select-trigger, .mal-bar:not(:has(.mal-remove-btn)) .mal-score-pick .az-select-trigger { border-radius: 0 0 15px 0; }
+    .mal-bar .mal-remove-btn { border-radius: 0 0 15px 0; }
+    .mal-bar:has(.mal-remove-btn) .mal-score-pick .az-select-trigger { border-radius: 0; }
+}
+.mal-bar-cta { flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; padding: 7px 7px 7px 16px; color: rgba(255,255,255,.78); font-size: 13.5px; }
+.mal-bar-cta .mal-pill-btn { padding: 8px 15px; }
+.badge-break { display: none; }
+.mal-bar-meter { background: rgba(255,255,255,.06); }
+@media (max-width: 768px) {
+    .badge-break { display: block; flex-basis: 100%; height: 0; }
+    .detail-facts { justify-content: center; }
+    .synopsis-toggle { display: block; margin-inline: auto; }
+    .mal-bar-panel { margin-inline: auto; }
+}
