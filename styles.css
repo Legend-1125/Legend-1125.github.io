@@ -2834,3 +2834,10 @@ html, body { overflow-x: clip; }
     .synopsis-toggle { display: block; margin-inline: auto; }
     .mal-bar-panel { margin-inline: auto; }
 }
+
+/* Wide screens: the Filters panel appears at its full width and fades in, rather
+   than growing sideways. Growing made the filters wrap into a tall stack for a
+   moment, so the anime below jumped down and slid back up on every click. */
+@media (min-width: 981px) {
+    .discover-filter-panel { transition: opacity .3s ease, transform .4s var(--transition-smooth); }
+}
