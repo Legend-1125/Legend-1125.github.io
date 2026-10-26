@@ -820,6 +820,7 @@ const VIEW_ROUTES = Object.freeze({
     'view-schedule': '#/schedule',
     'view-seasonal': '#/seasonal',
     'view-news': '#/news',
+    'view-profile': '#/profile',
 });
 const BROWSE_TARGETS = new Set(['trending', 'top', 'discover']);
 const BROWSE_TITLES = Object.freeze({ trending: 'Trending Now', top: 'Top Rated', discover: 'Discover' });
@@ -864,7 +865,10 @@ function parseRoute(hash = location.hash) {
     }
     if (section === 'browse' && BROWSE_TARGETS.has(id)) return { name: 'browse', target: id, page };
     if (section === 'studio' && numericId) return { name: 'studio', id: numericId, studioName: params.get('name') || '', page };
+    // Stats and History used to be My List tabs; they now live on the Profile page.
+    if (section === 'list' && segments.length === 1 && ['stats', 'history'].includes(params.get('tab'))) return { name: 'redirect', to: `#/profile?tab=${params.get('tab')}` };
     if (section === 'list' && segments.length === 1) return { name: 'list', tab: params.get('tab') || '', params: Object.fromEntries(params) };
+    if (section === 'profile' && segments.length === 1) return { name: 'profile', tab: params.get('tab') || '' };
     if (section === 'news' && segments.length === 1) return { name: 'news', source: params.get('source') || 'all', page };
     if (section === 'schedule' && segments.length === 1) return { name: section };
     if (section === 'seasonal' && segments.length === 1) return { name: 'seasonal', params: Object.fromEntries(params) };
@@ -951,6 +955,7 @@ function closeTransientPanels() {
 function renderRoute({ fresh = false } = {}) {
     const route = parseRoute();
     if (route.name === 'not-found') { navigate('#/', { replace: true }); return; }
+    if (route.name === 'redirect') { navigate(route.to, { replace: true }); return; }
     const revisit = trackHistoryEntry();
     pendingScrollRestore = revisit && !fresh ? (scrollMemory.get(currentEntryKey) ?? null) : null;
     closeTransientPanels();
@@ -975,6 +980,12 @@ function renderRoute({ fresh = false } = {}) {
             setPageTitle('My List');
             showView('view-history');
             if (window.MalSync) MalSync.renderMyList(route.tab, route.params);
+            restorePendingScroll();
+            break;
+        case 'profile':
+            setPageTitle('Profile');
+            showView('view-profile');
+            if (window.MalSync?.renderProfile) MalSync.renderProfile(route.tab);
             else renderHistoryLogGrid();
             restorePendingScroll();
             break;
@@ -1356,7 +1367,6 @@ function createAnimeCard(anime, isHistory = false) {
    kept for 12 hours for the same set of shows.
    ========================================== */
 const FOR_YOU_SEEDS = 8;
-const FOR_YOU_BECAUSE_ROWS = 2;
 const FOR_YOU_TTL = 12 * 60 * 60 * 1000;
 const FOR_YOU_CARD_FIELDS = 'id idMal isAdult status format episodes seasonYear averageScore popularity title { romaji english native } coverImage { large extraLarge }';
 let forYouToken = 0;
@@ -1413,12 +1423,10 @@ async function loadForYouRows() {
     // Score each suggestion: how much you liked the show it came from, and how many
     // AniList users agree it's a good follow-up.
     const pool = new Map();
-    const perSeed = [];
     seeds.forEach((seed, i) => {
         const media = data?.[`s${i}`];
         if (!media) return;
         const liked = (seed.score || 7) - 5;
-        const recs = [];
         for (const node of media.recommendations?.nodes || []) {
             const rec = node?.mediaRecommendation;
             if (!rec?.id || (rec.idMal && listed.has(rec.idMal)) || rec.status === 'NOT_YET_RELEASED') continue;
@@ -1427,22 +1435,15 @@ async function loadForYouRows() {
             const item = pool.get(rec.id) || { anime: rec, weight: 0 };
             item.weight += weight;
             pool.set(rec.id, item);
-            recs.push(rec);
         }
-        perSeed.push({ seed, media, recs });
     });
-    const top = [...pool.values()].sort((a, b) => b.weight - a.weight).slice(0, 20).map(item => item.anime);
-    const because = perSeed.filter(row => row.recs.length >= 4)
-        .sort((a, b) => String(b.seed.updatedAt).localeCompare(String(a.seed.updatedAt)))
-        .slice(0, FOR_YOU_BECAUSE_ROWS);
+    const top = [...pool.values()].sort((a, b) => b.weight - a.weight).slice(0, 24).map(item => item.anime);
 
     if (!top.length) { host.innerHTML = ''; host.dataset.key = ''; return; }
-    host.innerHTML = forYouRowHtml('row-for-you', 'Recommended for you')
-        + because.map((row, i) => forYouRowHtml(`row-because-${i}`, `Because you watched ${displayTitle(row.media)}`)).join('');
+    host.innerHTML = forYouRowHtml('row-for-you', 'Recommended for you');
     host.dataset.key = seedKey;
     wireSliderArrows(host);
     renderSliderTrack('row-for-you', top);
-    because.forEach((row, i) => renderSliderTrack(`row-because-${i}`, row.recs.slice(0, 15)));
 }
 
 /* ==========================================
@@ -1481,7 +1482,7 @@ function readSeasonalView(params = {}) {
     const year = Number(params.year);
     return {
         season: SEASON_ORDER.includes(season) ? season : now.season,
-        year: Number.isInteger(year) && year >= 1940 && year <= now.year + 3 ? year : now.year,
+        year: Number.isInteger(year) && year >= 1970 && year <= now.year + 2 ? year : now.year,
         format: SEASONAL_FORMATS[params.format] ? params.format : '',
         genre: ANILIST_GENRES.has(params.genre) ? params.genre : '',
         sort: SEASONAL_SORTS[params.sort] ? params.sort : 'popularity',
@@ -1506,6 +1507,13 @@ function initSeasonalControls() {
     const format = document.getElementById('seasonal-format');
     const genre = document.getElementById('seasonal-genre');
     const sort = document.getElementById('seasonal-sort');
+    const year = document.getElementById('seasonal-year');
+    if (year) {
+        const latest = seasonOf().year + 2;
+        year.innerHTML = Array.from({ length: latest - 1969 }, (_, i) => latest - i).map(y => `<option value="${y}">${y}</option>`).join('');
+        enhanceSelect(year);
+        year.addEventListener('change', () => { if (Number(year.value) !== seasonalView.year) setSeasonalView({ year: Number(year.value) }); });
+    }
     if (format) format.innerHTML = '<option value="">All formats</option>' + Object.entries(SEASONAL_FORMATS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
     if (genre) genre.innerHTML = '<option value="">All genres</option>' + [...ANILIST_GENRES].filter(g => g !== 'Hentai').map(g => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join('');
     if (sort) sort.innerHTML = Object.entries(SEASONAL_SORTS).map(([value, [label]]) => `<option value="${value}">${label}</option>`).join('');
@@ -1519,23 +1527,39 @@ function initSeasonalControls() {
 }
 
 function renderSeasonSwitch() {
-    const bar = document.getElementById('season-switch');
-    if (!bar) return;
+    const seg = document.getElementById('season-seg');
+    if (!seg || !seasonalView) return;
     const now = seasonOf();
-    const picks = [[shiftSeason(now, -1), 'Last season'], [now, 'This season'], [shiftSeason(now, 1), 'Next season']];
     const same = (a, b) => a.season === b.season && a.year === b.year;
-    const link = (target, note) => {
-        const active = same(target, seasonalView);
-        return `<a class="mylist-tab season-tab${active ? ' active' : ''}" href="${seasonalHash({ ...seasonalView, ...target })}"${active ? ' aria-current="page"' : ''}>${escapeHtml(chartSeasonLabel(target))}${note ? ` <span>${note}</span>` : ''}</a>`;
-    };
-    const elsewhere = !picks.some(([target]) => same(target, seasonalView));
-    bar.innerHTML = `<a class="season-step" href="${seasonalHash({ ...seasonalView, ...shiftSeason(seasonalView, -1) })}" aria-label="Previous season" title="Previous season">‹</a>`
-        + picks.map(([target, note]) => link(target, note)).join('')
-        + (elsewhere ? link(seasonalView, '') : '')
-        + `<a class="season-step" href="${seasonalHash({ ...seasonalView, ...shiftSeason(seasonalView, 1) })}" aria-label="Next season" title="Next season">›</a>`;
-    // On phones the tabs scroll sideways: bring the chosen season into view.
-    const active = bar.querySelector('.season-tab.active');
-    if (active && bar.scrollWidth > bar.clientWidth) bar.scrollLeft = Math.max(0, active.offsetLeft - bar.offsetLeft - (bar.clientWidth - active.offsetWidth) / 2);
+    seg.innerHTML = SEASON_ORDER.map(season => {
+        const target = { season, year: seasonalView.year };
+        const active = season === seasonalView.season;
+        const live = same(target, now);
+        return `<a class="season-seg-btn${active ? ' active' : ''}" href="${seasonalHash({ ...seasonalView, ...target })}"${active ? ' aria-current="page"' : ''}${live ? ' title="The current season"' : ''}>${SEASON_NAMES[season]}${live ? '<i class="season-live" aria-label="(now)"></i>' : ''}</a>`;
+    }).join('');
+    const prev = document.getElementById('season-prev');
+    const next = document.getElementById('season-next');
+    if (prev) prev.href = seasonalHash({ ...seasonalView, ...shiftSeason(seasonalView, -1) });
+    if (next) next.href = seasonalHash({ ...seasonalView, ...shiftSeason(seasonalView, 1) });
+    const year = document.getElementById('seasonal-year');
+    if (year) {
+        if (![...year.options].some(option => Number(option.value) === seasonalView.year)) year.insertAdjacentHTML('beforeend', `<option value="${seasonalView.year}">${seasonalView.year}</option>`);
+        year.value = String(seasonalView.year);
+        year._azRebuild?.();
+    }
+    const back = document.getElementById('season-now');
+    if (back) {
+        back.href = seasonalHash({ ...seasonalView, ...now });
+        back.classList.toggle('hidden', same(seasonalView, now));
+    }
+    // Is this season over, on now, or still to come?
+    const when = document.getElementById('season-when');
+    if (when) {
+        const order = (v) => v.year * 4 + SEASON_ORDER.indexOf(v.season);
+        const diff = order(seasonalView) - order(now);
+        when.textContent = diff === 0 ? 'Airing now' : diff > 0 ? 'Upcoming' : 'Past season';
+        when.className = `season-when ${diff === 0 ? 'now' : diff > 0 ? 'upcoming' : 'past'}`;
+    }
 }
 
 function renderSeasonal(params = {}) {
@@ -3532,14 +3556,16 @@ function renderNewsSourceTabs() {
     const show = multiSourceNewsAvailable();
     bar.classList.toggle('hidden', !show);
     if (!show) return;
-    const count = (id) => readNewsSourceCache(id)?.items?.length || 0;
-    const total = NEWS_SOURCES.reduce((sum, source) => sum + count(source.id), 0);
-    const tab = (id, label, n, extra = '') => `<a class="mylist-tab news-source-tab${newsSource === id ? ' active' : ''}${extra}" href="${newsHash(id)}"${newsSource === id ? ' aria-current="page"' : ''}>${id === 'all' ? '' : `<i class="news-dot news-src-${id}" aria-hidden="true"></i>`}${escapeHtml(label)}${n ? `<span>${n}</span>` : ''}</a>`;
-    bar.innerHTML = tab('all', 'All sources', total) + NEWS_SOURCES.map(source => {
-        const failed = newsSourceErrors.has(source.id) && !count(source.id);
-        return tab(source.id, source.name, count(source.id), failed ? ' unavailable' : '');
+    const has = (id) => Boolean(readNewsSourceCache(id)?.items?.length);
+    const tab = (id, label, extra = '') => `<a class="news-tab${newsSource === id ? ' active' : ''}${extra}" href="${newsHash(id)}"${newsSource === id ? ' aria-current="page"' : ''}>${id === 'all' ? '' : `<i class="news-dot news-src-${id}" aria-hidden="true"></i>`}${escapeHtml(label)}</a>`;
+    bar.innerHTML = tab('all', 'All news') + NEWS_SOURCES.map(source => {
+        const failed = newsSourceErrors.has(source.id) && !has(source.id);
+        return tab(source.id, source.name, failed ? ' unavailable' : '');
     }).join('');
-    bar.querySelectorAll('.news-source-tab.unavailable').forEach(link => { link.title = 'Not reachable right now'; });
+    bar.querySelectorAll('.news-tab.unavailable').forEach(link => { link.title = `${link.textContent} isn't reachable right now`; });
+    // On phones the tabs scroll sideways: keep the chosen one in view.
+    const active = bar.querySelector('.news-tab.active');
+    if (active && bar.scrollWidth > bar.clientWidth) bar.scrollLeft = Math.max(0, active.offsetLeft - bar.offsetLeft - (bar.clientWidth - active.offsetWidth) / 2);
 }
 function setNewsStatusWithAction(text, label, action) {
     setNewsStatus(text);
@@ -3771,7 +3797,7 @@ function enhanceSelect(select){
         menu.innerHTML=''; [...select.options].forEach(option=>{const button=document.createElement('button');button.type='button';button.className=`az-select-option${option.selected?' selected':''}`;button.textContent=option.textContent;button.disabled=option.disabled;button.onclick=()=>{select.value=option.value;select.dispatchEvent(new Event('change',{bubbles:true}));close();};menu.appendChild(button);});
     };
     const close=()=>{wrap.classList.remove('open');menu.classList.add('hidden');};
-    trigger.onclick=e=>{e.stopPropagation();document.querySelectorAll('.az-select.open').forEach(node=>{if(node!==wrap){node.classList.remove('open');node.querySelector('.az-select-menu')?.classList.add('hidden');}});rebuild();wrap.classList.toggle('open');menu.classList.toggle('hidden',!wrap.classList.contains('open'));};
+    trigger.onclick=e=>{e.stopPropagation();document.querySelectorAll('.az-select.open').forEach(node=>{if(node!==wrap){node.classList.remove('open');node.querySelector('.az-select-menu')?.classList.add('hidden');}});rebuild();wrap.classList.toggle('open');menu.classList.toggle('hidden',!wrap.classList.contains('open'));const chosen=menu.querySelector('.az-select-option.selected');if(chosen&&wrap.classList.contains('open'))menu.scrollTop=Math.max(0,chosen.offsetTop-menu.clientHeight/2+chosen.offsetHeight/2);};
     select._azRebuild=rebuild;
     select.addEventListener('change',rebuild); rebuild();
 }
